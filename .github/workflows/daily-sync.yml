@@ -46,12 +46,13 @@ jobs:
         run: |
           python daily_sync.py
 
-      - name: Upload logs on failure
+      - name: Upload debug artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: sync-logs
+          name: debug-artifacts
           path: |
             *.log
+            *.png
             screenshots/
           retention-days: 7
