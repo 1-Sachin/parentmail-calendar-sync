@@ -118,8 +118,34 @@ class ParentMailScraper:
             page_text = self.page.locator('body').inner_text()
             logger.info(f"Page contains text (first 500 chars): {page_text[:500]}")
 
-            # Step 2: Handle IRIS OAuth password page
-            # Try multiple selectors for Okta/IRIS password field
+            # IRIS has a two-step login: email first, then password
+            # Check if we're on the IRIS email step (shows "Email address" and "Next")
+            if 'identity.iris.co.uk' in self.page.url:
+                logger.info("On IRIS identity page - handling two-step login")
+
+                # Step 2a: Fill email on IRIS page and click Next
+                try:
+                    iris_email_field = self.page.locator('input[type="email"], input[type="text"]').first
+                    if iris_email_field.is_visible(timeout=3000):
+                        # Clear and fill email
+                        iris_email_field.fill(self.email)
+                        logger.info("Filled email on IRIS page")
+                        self.page.screenshot(path='step5_iris_email_filled.png')
+
+                        # Click Next button
+                        next_btn = self.page.locator('button:has-text("Next"), input[value="Next"], button[type="submit"]').first
+                        next_btn.click()
+                        logger.info("Clicked Next on IRIS page")
+
+                        # Wait for password page to load
+                        self.page.wait_for_timeout(3000)
+                        self.page.wait_for_load_state('networkidle')
+                        self.page.screenshot(path='step5b_after_iris_next.png')
+                        logger.info(f"After IRIS Next, URL: {self.page.url}")
+                except Exception as e:
+                    logger.warning(f"IRIS email step handling: {e}")
+
+            # Step 2b: Handle password page
             password_selectors = [
                 'input[type="password"]',
                 '#okta-signin-password',
@@ -133,7 +159,7 @@ class ParentMailScraper:
             for selector in password_selectors:
                 try:
                     field = self.page.locator(selector).first
-                    if field.is_visible(timeout=2000):
+                    if field.is_visible(timeout=3000):
                         password_field = field
                         logger.info(f"Found password field with selector: {selector}")
                         break
@@ -141,27 +167,22 @@ class ParentMailScraper:
                     continue
 
             if not password_field:
-                # Maybe we need to click something first to reveal password field
-                logger.info("Password field not immediately visible, checking for intermediate steps...")
-                self.page.screenshot(path='step5_no_password_field.png')
+                logger.info("Password field not immediately visible, checking page state...")
+                self.page.screenshot(path='step5c_looking_for_password.png')
 
-                # Look for "Sign in with password" or similar link
-                try:
-                    password_link = self.page.locator('a:has-text("password"), button:has-text("password"), a:has-text("Sign in"), [data-se="password"]').first
-                    if password_link.is_visible(timeout=3000):
-                        password_link.click()
-                        self.page.wait_for_timeout(2000)
-                        self.page.screenshot(path='step5b_clicked_password_option.png')
-                except:
-                    pass
+                # Log what's on the page now
+                page_text2 = self.page.locator('body').inner_text()
+                logger.info(f"Current page text (first 500 chars): {page_text2[:500]}")
 
-                # Try again to find password field
+                # Try waiting a bit longer and check again
+                self.page.wait_for_timeout(3000)
+
                 for selector in password_selectors:
                     try:
                         field = self.page.locator(selector).first
                         if field.is_visible(timeout=3000):
                             password_field = field
-                            logger.info(f"Found password field after intermediate step: {selector}")
+                            logger.info(f"Found password field after waiting: {selector}")
                             break
                     except:
                         continue
@@ -169,7 +190,6 @@ class ParentMailScraper:
             if not password_field:
                 logger.error("Could not find password field with any selector")
                 self.page.screenshot(path='step5_password_not_found.png')
-                # Dump the HTML for debugging
                 html_content = self.page.content()
                 logger.info(f"Page HTML (first 2000 chars): {html_content[:2000]}")
                 return False
