@@ -69,57 +69,93 @@ class ParentMailScraper:
             self.playwright.stop()
 
     def login(self) -> bool:
-        """Log into ParentMail."""
+        """Log into ParentMail via IRIS OAuth flow."""
         logger.info("Logging into ParentMail...")
 
         try:
             self.page.goto(PARENTMAIL_URL)
             self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(2000)
 
             # Click login/sign in if needed
             try:
                 login_button = self.page.locator('text=Sign in').first
-                if login_button.is_visible(timeout=3000):
+                if login_button.is_visible(timeout=5000):
                     login_button.click()
                     self.page.wait_for_load_state('networkidle')
+                    self.page.wait_for_timeout(2000)
             except:
                 pass
 
-            # Fill email
-            email_field = self.page.locator('input[type="email"], input[name="email"], #email')
+            logger.info(f"Current URL: {self.page.url}")
+
+            # Step 1: Fill email on ParentMail or IRIS page
+            email_field = self.page.locator('input[type="email"], input[name="username"], input[name="email"], #email, #okta-signin-username').first
+            email_field.wait_for(state='visible', timeout=10000)
             email_field.fill(self.email)
+            logger.info("Filled email field")
 
-            # Click continue/next if there's a two-step login
+            # Click continue/next/sign in to proceed to password
             try:
-                continue_btn = self.page.locator('button:has-text("Continue"), button:has-text("Next")').first
-                if continue_btn.is_visible(timeout=2000):
-                    continue_btn.click()
-                    self.page.wait_for_load_state('networkidle')
-            except:
-                pass
+                next_btn = self.page.locator('input[type="submit"], button[type="submit"], button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in")').first
+                next_btn.click()
+                logger.info("Clicked next/continue button")
+            except Exception as e:
+                logger.warning(f"No next button found, trying to continue: {e}")
 
-            # Fill password
-            password_field = self.page.locator('input[type="password"], input[name="password"], #password')
-            password_field.fill(self.password)
-
-            # Click login button
-            submit_btn = self.page.locator('button[type="submit"], button:has-text("Sign in"), button:has-text("Log in")').first
-            submit_btn.click()
-
-            # Wait for navigation
+            # Wait for redirect to IRIS identity provider or password field
+            self.page.wait_for_timeout(3000)
             self.page.wait_for_load_state('networkidle')
-            self.page.wait_for_timeout(2000)
+            logger.info(f"After email, URL: {self.page.url}")
 
-            # Check if login was successful (look for dashboard elements or emails link)
-            if 'login' not in self.page.url.lower() or self.page.locator('text=Emails').is_visible(timeout=5000):
-                logger.info("Login successful!")
+            # Step 2: Handle IRIS OAuth password page
+            # Wait for password field to be visible (may be on IRIS domain now)
+            password_field = self.page.locator('input[type="password"]').first
+            password_field.wait_for(state='visible', timeout=15000)
+            password_field.fill(self.password)
+            logger.info("Filled password field")
+
+            # Click sign in / verify button
+            submit_btn = self.page.locator('input[type="submit"], button[type="submit"], input[value="Sign in"], input[value="Verify"], button:has-text("Sign in"), button:has-text("Verify"), button:has-text("Log in")').first
+            submit_btn.click()
+            logger.info("Clicked submit button")
+
+            # Wait for redirect back to ParentMail
+            self.page.wait_for_timeout(5000)
+            self.page.wait_for_load_state('networkidle')
+            logger.info(f"After login, URL: {self.page.url}")
+
+            # Check if login was successful
+            # Should be redirected back to ParentMail dashboard
+            if 'pmx.parentmail.co.uk' in self.page.url:
+                logger.info("Login successful - redirected to ParentMail!")
                 return True
 
-            logger.error("Login may have failed - still on login page")
-            return False
+            # Alternative check: look for dashboard elements
+            try:
+                if self.page.locator('text=Emails').is_visible(timeout=5000):
+                    logger.info("Login successful - found Emails link!")
+                    return True
+            except:
+                pass
+
+            # Check if we're stuck on login page
+            if 'identity.iris.co.uk' in self.page.url or 'login' in self.page.url.lower():
+                logger.error("Login may have failed - still on login/identity page")
+                # Take screenshot for debugging
+                self.page.screenshot(path='login_failed.png')
+                return False
+
+            logger.info("Login appears successful")
+            return True
 
         except Exception as e:
             logger.error(f"Login failed: {e}")
+            # Try to take screenshot for debugging
+            try:
+                self.page.screenshot(path='login_error.png')
+            except:
+                pass
             return False
 
     def get_latest_newsletter(self) -> Optional[str]:
