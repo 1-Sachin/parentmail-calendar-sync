@@ -76,6 +76,8 @@ class ParentMailScraper:
             self.page.goto(PARENTMAIL_URL)
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(2000)
+            self.page.screenshot(path='step1_parentmail_home.png')
+            logger.info(f"Step 1 - ParentMail home, URL: {self.page.url}")
 
             # Click login/sign in if needed
             try:
@@ -87,13 +89,16 @@ class ParentMailScraper:
             except:
                 pass
 
-            logger.info(f"Current URL: {self.page.url}")
+            self.page.screenshot(path='step2_after_signin_click.png')
+            logger.info(f"Step 2 - After sign in click, URL: {self.page.url}")
 
             # Step 1: Fill email on ParentMail or IRIS page
             email_field = self.page.locator('input[type="email"], input[name="username"], input[name="email"], #email, #okta-signin-username').first
             email_field.wait_for(state='visible', timeout=10000)
             email_field.fill(self.email)
             logger.info("Filled email field")
+
+            self.page.screenshot(path='step3_email_filled.png')
 
             # Click continue/next/sign in to proceed to password
             try:
@@ -103,30 +108,104 @@ class ParentMailScraper:
             except Exception as e:
                 logger.warning(f"No next button found, trying to continue: {e}")
 
-            # Wait for redirect to IRIS identity provider or password field
-            self.page.wait_for_timeout(3000)
+            # Wait for redirect to IRIS identity provider
+            self.page.wait_for_timeout(5000)
             self.page.wait_for_load_state('networkidle')
-            logger.info(f"After email, URL: {self.page.url}")
+            self.page.screenshot(path='step4_after_email_submit.png')
+            logger.info(f"Step 4 - After email submit, URL: {self.page.url}")
+
+            # Log page content for debugging
+            page_text = self.page.locator('body').inner_text()
+            logger.info(f"Page contains text (first 500 chars): {page_text[:500]}")
 
             # Step 2: Handle IRIS OAuth password page
-            # Wait for password field to be visible (may be on IRIS domain now)
-            password_field = self.page.locator('input[type="password"]').first
-            password_field.wait_for(state='visible', timeout=15000)
+            # Try multiple selectors for Okta/IRIS password field
+            password_selectors = [
+                'input[type="password"]',
+                '#okta-signin-password',
+                '#password',
+                'input[name="password"]',
+                'input[name="credentials.passcode"]',
+                '[data-se="o-form-input-password"]',
+            ]
+
+            password_field = None
+            for selector in password_selectors:
+                try:
+                    field = self.page.locator(selector).first
+                    if field.is_visible(timeout=2000):
+                        password_field = field
+                        logger.info(f"Found password field with selector: {selector}")
+                        break
+                except:
+                    continue
+
+            if not password_field:
+                # Maybe we need to click something first to reveal password field
+                logger.info("Password field not immediately visible, checking for intermediate steps...")
+                self.page.screenshot(path='step5_no_password_field.png')
+
+                # Look for "Sign in with password" or similar link
+                try:
+                    password_link = self.page.locator('a:has-text("password"), button:has-text("password"), a:has-text("Sign in"), [data-se="password"]').first
+                    if password_link.is_visible(timeout=3000):
+                        password_link.click()
+                        self.page.wait_for_timeout(2000)
+                        self.page.screenshot(path='step5b_clicked_password_option.png')
+                except:
+                    pass
+
+                # Try again to find password field
+                for selector in password_selectors:
+                    try:
+                        field = self.page.locator(selector).first
+                        if field.is_visible(timeout=3000):
+                            password_field = field
+                            logger.info(f"Found password field after intermediate step: {selector}")
+                            break
+                    except:
+                        continue
+
+            if not password_field:
+                logger.error("Could not find password field with any selector")
+                self.page.screenshot(path='step5_password_not_found.png')
+                # Dump the HTML for debugging
+                html_content = self.page.content()
+                logger.info(f"Page HTML (first 2000 chars): {html_content[:2000]}")
+                return False
+
             password_field.fill(self.password)
             logger.info("Filled password field")
+            self.page.screenshot(path='step6_password_filled.png')
 
             # Click sign in / verify button
-            submit_btn = self.page.locator('input[type="submit"], button[type="submit"], input[value="Sign in"], input[value="Verify"], button:has-text("Sign in"), button:has-text("Verify"), button:has-text("Log in")').first
-            submit_btn.click()
-            logger.info("Clicked submit button")
+            submit_selectors = [
+                'input[type="submit"]',
+                'button[type="submit"]',
+                'input[value="Sign in"]',
+                'input[value="Verify"]',
+                'button:has-text("Sign in")',
+                'button:has-text("Verify")',
+                '[data-se="o-form-button-bar"] button',
+            ]
+
+            for selector in submit_selectors:
+                try:
+                    submit_btn = self.page.locator(selector).first
+                    if submit_btn.is_visible(timeout=2000):
+                        submit_btn.click()
+                        logger.info(f"Clicked submit with selector: {selector}")
+                        break
+                except:
+                    continue
 
             # Wait for redirect back to ParentMail
             self.page.wait_for_timeout(5000)
             self.page.wait_for_load_state('networkidle')
-            logger.info(f"After login, URL: {self.page.url}")
+            self.page.screenshot(path='step7_after_login_submit.png')
+            logger.info(f"Step 7 - After login submit, URL: {self.page.url}")
 
             # Check if login was successful
-            # Should be redirected back to ParentMail dashboard
             if 'pmx.parentmail.co.uk' in self.page.url:
                 logger.info("Login successful - redirected to ParentMail!")
                 return True
@@ -142,7 +221,6 @@ class ParentMailScraper:
             # Check if we're stuck on login page
             if 'identity.iris.co.uk' in self.page.url or 'login' in self.page.url.lower():
                 logger.error("Login may have failed - still on login/identity page")
-                # Take screenshot for debugging
                 self.page.screenshot(path='login_failed.png')
                 return False
 
@@ -151,7 +229,6 @@ class ParentMailScraper:
 
         except Exception as e:
             logger.error(f"Login failed: {e}")
-            # Try to take screenshot for debugging
             try:
                 self.page.screenshot(path='login_error.png')
             except:
