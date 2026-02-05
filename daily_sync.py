@@ -226,15 +226,35 @@ class ParentMailScraper:
                 except:
                     continue
 
-            # Wait for redirect back to ParentMail
-            self.page.wait_for_timeout(5000)
+            # Wait for redirect back to ParentMail - may take a while
+            logger.info("Waiting for redirect back to ParentMail...")
+
+            # Wait for URL to change to ParentMail domain
+            max_wait = 15  # seconds
+            for i in range(max_wait):
+                self.page.wait_for_timeout(1000)
+                current_url = self.page.url
+                logger.info(f"Redirect check {i+1}/{max_wait}: {current_url}")
+
+                if 'pmx.parentmail.co.uk' in current_url:
+                    logger.info("Redirect to ParentMail detected!")
+                    break
+
             self.page.wait_for_load_state('networkidle')
             self.page.screenshot(path='step7_after_login_submit.png')
-            logger.info(f"Step 7 - After login submit, URL: {self.page.url}")
+            logger.info(f"Step 7 - Final URL after login: {self.page.url}")
 
             # Check if login was successful
             if 'pmx.parentmail.co.uk' in self.page.url:
-                logger.info("Login successful - redirected to ParentMail!")
+                logger.info("Login successful - on ParentMail!")
+
+                # Navigate to home page to ensure session is established
+                self.page.goto(f"{PARENTMAIL_URL}")
+                self.page.wait_for_load_state('networkidle')
+                self.page.wait_for_timeout(2000)
+                self.page.screenshot(path='step8_parentmail_home_after_login.png')
+                logger.info(f"ParentMail home after login, URL: {self.page.url}")
+
                 return True
 
             # Alternative check: look for dashboard elements
@@ -245,10 +265,14 @@ class ParentMailScraper:
             except:
                 pass
 
-            # Check if we're stuck on login page
+            # Check if we're stuck on login/identity page
             if 'identity.iris.co.uk' in self.page.url or 'login' in self.page.url.lower():
-                logger.error("Login may have failed - still on login/identity page")
+                logger.error("Login failed - still on login/identity page")
                 self.page.screenshot(path='login_failed.png')
+
+                # Log page content to see if there's an error message
+                page_text = self.page.locator('body').inner_text()
+                logger.error(f"Login page content: {page_text[:500]}")
                 return False
 
             logger.info("Login appears successful")
@@ -333,10 +357,42 @@ class ParentMailScraper:
         all_events = []
 
         try:
-            # Navigate to emails
-            self.page.goto(f"{PARENTMAIL_URL}/ui/#/messages/emails")
-            self.page.wait_for_load_state('networkidle')
-            self.page.wait_for_timeout(3000)
+            # Try different URL patterns for emails section
+            email_urls = [
+                f"{PARENTMAIL_URL}/#/messages/emails",
+                f"{PARENTMAIL_URL}/ui/#/messages/emails",
+                f"{PARENTMAIL_URL}/#messages/emails",
+                f"{PARENTMAIL_URL}/messages",
+            ]
+
+            page_loaded = False
+            for url in email_urls:
+                logger.info(f"Trying emails URL: {url}")
+                self.page.goto(url)
+                self.page.wait_for_load_state('networkidle')
+                self.page.wait_for_timeout(3000)
+
+                # Check if we got a valid page (not 404)
+                page_text = self.page.locator('body').inner_text()
+                if '404' not in page_text and 'Not Found' not in page_text:
+                    logger.info(f"Successfully loaded emails page at: {url}")
+                    page_loaded = True
+                    break
+                else:
+                    logger.warning(f"Got 404 at {url}, trying next...")
+
+            if not page_loaded:
+                # Try clicking on Emails link from current page
+                logger.info("Trying to find and click Emails link...")
+                try:
+                    emails_link = self.page.locator('text=Emails, a:has-text("Emails"), [href*="emails"], [href*="messages"]').first
+                    if emails_link.is_visible(timeout=5000):
+                        emails_link.click()
+                        self.page.wait_for_load_state('networkidle')
+                        self.page.wait_for_timeout(2000)
+                        logger.info(f"Clicked Emails link, now at: {self.page.url}")
+                except Exception as e:
+                    logger.warning(f"Could not find Emails link: {e}")
 
             self.page.screenshot(path='emails_inbox.png')
 
