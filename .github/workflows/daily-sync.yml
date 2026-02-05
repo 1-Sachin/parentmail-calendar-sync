@@ -43,6 +43,8 @@ jobs:
           PARENTMAIL_EMAIL: ${{ secrets.PARENTMAIL_EMAIL }}
           PARENTMAIL_PASSWORD: ${{ secrets.PARENTMAIL_PASSWORD }}
           GOOGLE_CALENDAR_TOKEN: ${{ secrets.GOOGLE_CALENDAR_TOKEN }}
+          NOTIFICATION_EMAIL: ${{ secrets.PARENTMAIL_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: |
           python daily_sync.py
 
