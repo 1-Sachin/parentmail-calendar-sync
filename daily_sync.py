@@ -16,6 +16,9 @@ import os
 import re
 import json
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -24,6 +27,10 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+# Email configuration
+NOTIFICATION_EMAIL = os.environ.get('NOTIFICATION_EMAIL', 'sachinsharma0787@gmail.com')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')  # Gmail App Password
 
 # Configure logging
 logging.basicConfig(
@@ -740,10 +747,10 @@ class GoogleCalendarSync:
             logger.error(f"Failed to create event: {e}")
             return None
 
-    def sync_events(self, events: List[Dict]) -> Tuple[int, int]:
+    def sync_events(self, events: List[Dict]) -> Tuple[int, int, List[Dict]]:
         """
         Sync events to calendar, avoiding duplicates.
-        Returns (created_count, skipped_count).
+        Returns (created_count, skipped_count, created_events_list).
         """
         # Get existing events for the next 6 months
         start_date = datetime.now()
@@ -752,6 +759,7 @@ class GoogleCalendarSync:
 
         created = 0
         skipped = 0
+        created_events = []  # Track details of created events
 
         for event in events:
             # Parse date first to check for duplicates
@@ -766,13 +774,100 @@ class GoogleCalendarSync:
                 event_id = self.create_event(event)
                 if event_id:
                     created += 1
+                    created_events.append({
+                        'title': event.get('title'),
+                        'date': event.get('date_parsed'),
+                        'time': event.get('time', 'All day'),
+                        'child': event.get('child', 'Both')
+                    })
                     # Add to existing events to prevent duplicates within this batch
                     existing_events.append({
                         'summary': event.get('title'),
                         'start': {'date': event.get('date_parsed')}
                     })
 
-        return created, skipped
+        return created, skipped, created_events
+
+
+def send_notification_email(created_events: List[Dict]) -> bool:
+    """Send email notification about newly added calendar events."""
+    if not SMTP_PASSWORD:
+        logger.warning("SMTP_PASSWORD not set - skipping email notification")
+        return False
+
+    if not created_events:
+        logger.info("No events to notify about - skipping email")
+        return True
+
+    # Build email content
+    subject = f"📅 {len(created_events)} new school event(s) added to calendar"
+
+    # Build HTML body
+    events_html = ""
+    for event in created_events:
+        child_emoji = "👦" if event['child'] == 'Rivan' else "👧" if event['child'] == 'Arvi' else "👨‍👩‍👧‍👦"
+        events_html += f"""
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;">{child_emoji} {event['child']}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;"><strong>{event['title']}</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;">{event['date']}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;">{event['time']}</td>
+        </tr>
+        """
+
+    html_body = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #2e7d32;">🏫 ParentMail Calendar Sync</h2>
+        <p>The following <strong>{len(created_events)} event(s)</strong> have been added to your Google Calendar:</p>
+
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+            <thead>
+                <tr style="background-color: #f5f5f5;">
+                    <th style="padding: 10px; text-align: left;">For</th>
+                    <th style="padding: 10px; text-align: left;">Event</th>
+                    <th style="padding: 10px; text-align: left;">Date</th>
+                    <th style="padding: 10px; text-align: left;">Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {events_html}
+            </tbody>
+        </table>
+
+        <p style="color: #666; font-size: 12px;">
+            This is an automated message from your ParentMail Calendar Sync.<br>
+            Events are synced daily at 6:00 AM UK time.
+        </p>
+    </body>
+    </html>
+    """
+
+    # Plain text version
+    text_body = f"ParentMail Calendar Sync\n\n{len(created_events)} new event(s) added:\n\n"
+    for event in created_events:
+        text_body += f"- [{event['child']}] {event['title']} - {event['date']} at {event['time']}\n"
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = NOTIFICATION_EMAIL
+        msg['To'] = NOTIFICATION_EMAIL
+
+        msg.attach(MIMEText(text_body, 'plain'))
+        msg.attach(MIMEText(html_body, 'html'))
+
+        # Connect to Gmail SMTP
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(NOTIFICATION_EMAIL, SMTP_PASSWORD)
+            server.sendmail(NOTIFICATION_EMAIL, NOTIFICATION_EMAIL, msg.as_string())
+
+        logger.info(f"Notification email sent to {NOTIFICATION_EMAIL}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send notification email: {e}")
+        return False
 
 
 def main():
@@ -827,9 +922,10 @@ def main():
         return 0
 
     # Step 3: Sync to Google Calendar
+    created_events = []
     try:
         calendar = GoogleCalendarSync(token_json=google_token)
-        created, skipped = calendar.sync_events(filtered_events)
+        created, skipped, created_events = calendar.sync_events(filtered_events)
 
         logger.info("=" * 50)
         logger.info(f"Sync complete!")
@@ -840,6 +936,10 @@ def main():
     except Exception as e:
         logger.error(f"Calendar sync failed: {e}")
         return 1
+
+    # Step 4: Send email notification (only if events were created)
+    if created_events:
+        send_notification_email(created_events)
 
     return 0
 
