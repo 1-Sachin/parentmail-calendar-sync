@@ -262,8 +262,171 @@ class ParentMailScraper:
                 pass
             return False
 
+    def get_emails_list(self) -> List[Dict]:
+        """Navigate to emails and get list of recent emails."""
+        logger.info("Getting list of recent emails...")
+
+        try:
+            # Navigate to emails section
+            self.page.goto(f"{PARENTMAIL_URL}/ui/#/messages/emails")
+            self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(3000)
+
+            self.page.screenshot(path='emails_list.png')
+
+            # Get all email items in the list
+            # ParentMail typically shows emails in a list/table format
+            email_items = self.page.locator('[class*="message"], [class*="email"], [class*="item"], tr[class*="row"], .mail-item, .message-row').all()
+
+            if not email_items:
+                # Try alternative: look for clickable elements that might be emails
+                email_items = self.page.locator('div[role="listitem"], div[role="row"], .clickable').all()
+
+            logger.info(f"Found {len(email_items)} potential email items")
+
+            # Log what we see on the page for debugging
+            page_text = self.page.locator('body').inner_text()
+            logger.info(f"Emails page content (first 1000 chars): {page_text[:1000]}")
+
+            return email_items[:10]  # Check up to 10 most recent emails
+
+        except Exception as e:
+            logger.error(f"Failed to get emails list: {e}")
+            return []
+
+    def check_email_for_events(self, email_element) -> Optional[List[Dict]]:
+        """Click on an email and check if it contains event information."""
+        try:
+            # Click on the email to open it
+            email_element.click()
+            self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(2000)
+
+            # Get email content
+            email_content = self.page.locator('body').inner_text()
+            logger.info(f"Checking email content (first 300 chars): {email_content[:300]}")
+
+            # Check for Sway link
+            sway_link = self.get_sway_link()
+            if sway_link:
+                logger.info(f"Found Sway link in email: {sway_link}")
+                events = self.scrape_sway_diary_dates(sway_link)
+                if events:
+                    return events
+
+            # Check for date patterns directly in email (for non-Sway emails)
+            events = self._extract_events_from_text(email_content)
+            if events:
+                logger.info(f"Found {len(events)} events directly in email")
+                return events
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Error checking email: {e}")
+            return None
+
+    def scan_all_recent_emails(self) -> List[Dict]:
+        """Scan recent emails for any event information."""
+        logger.info("Scanning recent emails for events...")
+
+        all_events = []
+
+        try:
+            # Navigate to emails
+            self.page.goto(f"{PARENTMAIL_URL}/ui/#/messages/emails")
+            self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(3000)
+
+            self.page.screenshot(path='emails_inbox.png')
+
+            # Log page content to understand structure
+            page_text = self.page.locator('body').inner_text()
+            logger.info(f"Inbox page text (first 1500 chars): {page_text[:1500]}")
+
+            # Try to find clickable email rows/items
+            # Common selectors for email lists
+            selectors_to_try = [
+                'table tbody tr',
+                '[class*="message-item"]',
+                '[class*="mail-row"]',
+                '[class*="email-row"]',
+                'div[class*="list"] > div',
+                '.message-list-item',
+                '[data-testid*="message"]',
+                'a[href*="message"]',
+            ]
+
+            email_elements = []
+            for selector in selectors_to_try:
+                elements = self.page.locator(selector).all()
+                if elements and len(elements) > 0:
+                    logger.info(f"Found {len(elements)} elements with selector: {selector}")
+                    email_elements = elements[:5]  # Check up to 5 recent emails
+                    break
+
+            if not email_elements:
+                logger.warning("Could not find email list items - trying to click first visible email link")
+                # Fallback: just try to find and click any email
+                first_email = self.page.locator('text=/newsletter|update|diary|dates|calendar|event/i').first
+                if first_email.is_visible(timeout=3000):
+                    email_elements = [first_email]
+
+            logger.info(f"Will check {len(email_elements)} emails")
+
+            for i, email_elem in enumerate(email_elements):
+                try:
+                    logger.info(f"Checking email {i+1}...")
+
+                    # Navigate back to inbox first (if not first email)
+                    if i > 0:
+                        self.page.goto(f"{PARENTMAIL_URL}/ui/#/messages/emails")
+                        self.page.wait_for_load_state('networkidle')
+                        self.page.wait_for_timeout(2000)
+                        # Re-find the element since page reloaded
+                        for selector in selectors_to_try:
+                            elements = self.page.locator(selector).all()
+                            if elements and len(elements) > i:
+                                email_elem = elements[i]
+                                break
+
+                    # Click on email
+                    email_elem.click()
+                    self.page.wait_for_load_state('networkidle')
+                    self.page.wait_for_timeout(2000)
+
+                    self.page.screenshot(path=f'email_{i+1}_content.png')
+
+                    # Check for Sway link
+                    sway_link = self.get_sway_link()
+                    if sway_link:
+                        logger.info(f"Found Sway link in email {i+1}")
+                        events = self.scrape_sway_diary_dates(sway_link)
+                        if events:
+                            all_events.extend(events)
+                            logger.info(f"Extracted {len(events)} events from Sway")
+                    else:
+                        # Check for events directly in email content
+                        email_text = self.page.locator('body').inner_text()
+                        events = self._extract_events_from_text(email_text)
+                        if events:
+                            all_events.extend(events)
+                            logger.info(f"Extracted {len(events)} events from email text")
+
+                except Exception as e:
+                    logger.warning(f"Error processing email {i+1}: {e}")
+                    continue
+
+            logger.info(f"Total events found across all emails: {len(all_events)}")
+            return all_events
+
+        except Exception as e:
+            logger.error(f"Failed to scan emails: {e}")
+            return []
+
     def get_latest_newsletter(self) -> Optional[str]:
-        """Navigate to emails and find the latest parent newsletter."""
+        """Legacy method - now redirects to scan_all_recent_emails."""
+        # This method is kept for compatibility but the main flow now uses scan_all_recent_emails
         logger.info("Finding latest newsletter...")
 
         try:
@@ -272,26 +435,46 @@ class ParentMailScraper:
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(2000)
 
-            # Look for newsletter with "Parent newsletter" in title
-            newsletter_selector = 'text=/Parent newsletter.*Friday/i'
+            self.page.screenshot(path='newsletter_search.png')
 
-            # Try to find and click the latest newsletter
-            newsletters = self.page.locator(newsletter_selector)
-            if newsletters.count() > 0:
-                newsletters.first.click()
-                self.page.wait_for_load_state('networkidle')
-                self.page.wait_for_timeout(2000)
-                logger.info("Found and opened newsletter")
-                return self.page.url
+            # Log what's on the page
+            page_text = self.page.locator('body').inner_text()
+            logger.info(f"Page text (first 1000 chars): {page_text[:1000]}")
 
-            # Alternative: try clicking on any email that contains "newsletter"
-            any_newsletter = self.page.locator('text=/newsletter/i').first
-            if any_newsletter.is_visible(timeout=3000):
-                any_newsletter.click()
-                self.page.wait_for_load_state('networkidle')
-                return self.page.url
+            # Try multiple patterns to find emails
+            patterns = [
+                'text=/Parent newsletter/i',
+                'text=/newsletter/i',
+                'text=/diary dates/i',
+                'text=/weekly update/i',
+                'text=/school update/i',
+            ]
 
-            logger.warning("Could not find newsletter")
+            for pattern in patterns:
+                try:
+                    element = self.page.locator(pattern).first
+                    if element.is_visible(timeout=2000):
+                        element.click()
+                        self.page.wait_for_load_state('networkidle')
+                        self.page.wait_for_timeout(2000)
+                        logger.info(f"Found and opened email matching: {pattern}")
+                        return self.page.url
+                except:
+                    continue
+
+            # If no specific pattern found, try clicking the first/most recent email
+            try:
+                first_row = self.page.locator('table tbody tr, [class*="message"], [class*="row"]').first
+                if first_row.is_visible(timeout=3000):
+                    first_row.click()
+                    self.page.wait_for_load_state('networkidle')
+                    self.page.wait_for_timeout(2000)
+                    logger.info("Opened first/most recent email")
+                    return self.page.url
+            except:
+                pass
+
+            logger.warning("Could not find any emails to open")
             return None
 
         except Exception as e:
@@ -887,32 +1070,23 @@ def main():
 
     events = []
 
-    # Step 1: Scrape ParentMail
+    # Step 1: Scrape ParentMail - check ALL recent emails
     try:
         with ParentMailScraper(PARENTMAIL_EMAIL, PARENTMAIL_PASSWORD) as scraper:
             if not scraper.login():
                 logger.error("Failed to login to ParentMail")
                 return 1
 
-            newsletter_url = scraper.get_latest_newsletter()
-            if not newsletter_url:
-                logger.warning("Could not find latest newsletter")
-                return 0  # Not an error - maybe no new newsletter
+            # Scan all recent emails for events (not just newsletters)
+            events = scraper.scan_all_recent_emails()
 
-            sway_link = scraper.get_sway_link()
-            if not sway_link:
-                logger.warning("Could not find Sway link in newsletter")
+            if not events:
+                logger.info("No events found in any recent emails")
                 return 0
-
-            events = scraper.scrape_sway_diary_dates(sway_link)
 
     except Exception as e:
         logger.error(f"Scraping failed: {e}")
         return 1
-
-    if not events:
-        logger.info("No events found in newsletter")
-        return 0
 
     # Step 2: Filter events
     filtered_events = EventFilter.filter_events(events)
