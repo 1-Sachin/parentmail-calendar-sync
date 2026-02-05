@@ -263,65 +263,88 @@ class ParentMailScraper:
                 except:
                     continue
 
-            # Wait for potential "Stay signed in?" prompt
-            self.page.wait_for_timeout(3000)
+            # Wait for potential "Stay signed in?" prompt to fully load
+            logger.info("Waiting for 'Stay signed in' page to load...")
+            self.page.wait_for_timeout(5000)
             self.page.wait_for_load_state('networkidle')
 
-            # Handle IRIS "Keep me signed in for the rest of the day" prompt
-            logger.info("Checking for 'Stay signed in' prompt...")
             self.page.screenshot(path='step6b_checking_stay_signed_in.png')
 
             # Log what's on the page
             page_content = self.page.locator('body').inner_text()
             logger.info(f"Page content after password submit: {page_content[:500]}")
 
-            try:
-                # Look for the specific IRIS "Stay signed in" button
-                stay_signed_in_selectors = [
-                    'button:has-text("Stay signed in")',
-                    'text="Stay signed in"',
-                    'button:text-is("Stay signed in")',
-                    'button >> text="Stay signed in"',
-                    'button:has-text("Don\'t stay signed in")',  # Either button works
-                ]
+            # Check if we're on the "Keep me signed in" page
+            if 'Keep me signed in' in page_content or 'Stay signed in' in page_content:
+                logger.info("Found 'Stay signed in' prompt - attempting to click...")
 
                 clicked = False
-                for selector in stay_signed_in_selectors:
+
+                # Method 1: Try clicking by exact role and name
+                try:
+                    btn = self.page.get_by_role("button", name="Stay signed in")
+                    if btn.is_visible(timeout=3000):
+                        btn.click()
+                        logger.info("Clicked 'Stay signed in' using get_by_role")
+                        clicked = True
+                        self.page.wait_for_timeout(3000)
+                except Exception as e:
+                    logger.info(f"get_by_role method failed: {e}")
+
+                # Method 2: Try clicking by text content
+                if not clicked:
                     try:
-                        btn = self.page.locator(selector).first
-                        if btn.is_visible(timeout=3000):
+                        btn = self.page.get_by_text("Stay signed in", exact=True)
+                        if btn.is_visible(timeout=2000):
                             btn.click()
-                            logger.info(f"Clicked 'Stay signed in' button: {selector}")
+                            logger.info("Clicked 'Stay signed in' using get_by_text")
                             clicked = True
                             self.page.wait_for_timeout(3000)
-                            break
                     except Exception as e:
-                        logger.debug(f"Selector {selector} didn't work: {e}")
-                        continue
+                        logger.info(f"get_by_text method failed: {e}")
 
+                # Method 3: Try various CSS selectors
                 if not clicked:
-                    # Try a more generic approach - find any button on the page
-                    logger.info("Trying generic button search...")
-                    buttons = self.page.locator('button').all()
-                    logger.info(f"Found {len(buttons)} buttons on page")
-                    for btn in buttons:
+                    selectors = [
+                        'button:has-text("Stay signed in")',
+                        'button:text-is("Stay signed in")',
+                        'button:has-text("Don\'t stay signed in")',
+                    ]
+                    for selector in selectors:
                         try:
-                            btn_text = btn.inner_text()
-                            logger.info(f"Button found: '{btn_text}'")
-                            if 'stay signed in' in btn_text.lower() or 'sign' in btn_text.lower():
+                            btn = self.page.locator(selector).first
+                            if btn.is_visible(timeout=2000):
                                 btn.click()
-                                logger.info(f"Clicked button with text: {btn_text}")
+                                logger.info(f"Clicked button with selector: {selector}")
                                 clicked = True
                                 self.page.wait_for_timeout(3000)
                                 break
-                        except:
-                            continue
+                        except Exception as e:
+                            logger.debug(f"Selector {selector} failed: {e}")
+
+                # Method 4: Find all buttons and click the right one
+                if not clicked:
+                    logger.info("Trying to find all buttons...")
+                    buttons = self.page.locator('button').all()
+                    logger.info(f"Found {len(buttons)} buttons")
+                    for i, btn in enumerate(buttons):
+                        try:
+                            btn_text = btn.inner_text()
+                            logger.info(f"Button {i}: '{btn_text}'")
+                            if 'Stay signed in' in btn_text:
+                                btn.click()
+                                logger.info(f"Clicked button: '{btn_text}'")
+                                clicked = True
+                                self.page.wait_for_timeout(3000)
+                                break
+                        except Exception as e:
+                            logger.debug(f"Button {i} error: {e}")
 
                 if not clicked:
-                    logger.warning("Could not find 'Stay signed in' button - continuing anyway")
-
-            except Exception as e:
-                logger.warning(f"Error handling 'stay signed in' prompt: {e}")
+                    logger.error("FAILED to click 'Stay signed in' button!")
+                    self.page.screenshot(path='stay_signed_in_failed.png')
+            else:
+                logger.info("No 'Stay signed in' prompt detected - may have been skipped")
 
             self.page.screenshot(path='step6b_after_stay_signed_in.png')
 
