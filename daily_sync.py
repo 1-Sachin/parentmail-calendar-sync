@@ -614,7 +614,7 @@ class ParentMailScraper:
 
                     self.page.screenshot(path=f'email_{i+1}_content.png')
 
-                    # Check for Sway link
+                    # Check for Sway link (newsletters have these - most reliable source)
                     sway_link = self.get_sway_link()
                     if sway_link:
                         logger.info(f"Found Sway link in email {i+1}")
@@ -623,12 +623,14 @@ class ParentMailScraper:
                             all_events.extend(events)
                             logger.info(f"Extracted {len(events)} events from Sway")
                     else:
-                        # Check for events directly in email content
+                        # For non-Sway emails, use STRICT mode:
+                        # Only extract events that specifically mention YR/Y2/KS1
+                        # This avoids extracting junk like "Open 20th", "Closed 6th"
                         email_text = self.page.locator('body').inner_text()
-                        events = self._extract_events_from_text(email_text)
+                        events = self._extract_events_from_text(email_text, strict_mode=True)
                         if events:
                             all_events.extend(events)
-                            logger.info(f"Extracted {len(events)} events from email text")
+                            logger.info(f"Extracted {len(events)} YR/Y2-specific events from email text")
 
                 except Exception as e:
                     logger.warning(f"Error processing email {i+1}: {e}")
@@ -812,16 +814,74 @@ class ParentMailScraper:
             'raw_text': text
         }
 
-    def _extract_events_from_text(self, text: str) -> List[Dict]:
-        """Extract events from raw text content."""
+    def _extract_events_from_text(self, text: str, strict_mode: bool = False) -> List[Dict]:
+        """
+        Extract events from raw text content.
+
+        Args:
+            text: The text to extract events from
+            strict_mode: If True, only extract events that mention YR/Y2/KS1 keywords
+                        (used for non-Sway emails to avoid extracting junk)
+        """
         events = []
         lines = text.split('\n')
 
+        # Keywords that indicate a real school event (not just a date mention)
+        event_keywords = [
+            'trip', 'assembly', 'meeting', 'sports', 'day', 'week', 'concert',
+            'performance', 'celebration', 'parents', 'evening', 'workshop',
+            'fair', 'festival', 'party', 'treat', 'activity', 'visit', 'visitor',
+            'class', 'photo', 'photographs', 'homework', 'reading', 'phonics',
+            'nativity', 'harvest', 'christmas', 'easter', 'term', 'holiday',
+            'inset', 'training', 'club', 'breakfast', 'after school', 'disco',
+            'film', 'movie', 'bike', 'helmet', 'uniform', 'book', 'library'
+        ]
+
+        # Keywords that indicate this is NOT an event (skip these)
+        skip_keywords = [
+            'open', 'closed', 'hours', 'am -', 'pm -', 'available', 'contact',
+            'email', 'phone', 'website', 'click here', 'sign up', 'register',
+            'copyright', 'privacy', 'terms', 'unsubscribe'
+        ]
+
+        # Year group keywords for strict mode
+        year_keywords = ['yr', 'y2', 'y1', 'ks1', 'reception', 'year 2', 'year 1',
+                        'red class', 'yellow class']
+
         for line in lines:
             line = line.strip()
-            if len(line) > 10:  # Skip very short lines
-                event = self._parse_event_text(line)
-                if event:
+            if len(line) < 15:  # Skip very short lines
+                continue
+
+            line_lower = line.lower()
+
+            # Skip lines that look like non-events
+            if any(skip in line_lower for skip in skip_keywords):
+                continue
+
+            # In strict mode, require year group keywords
+            if strict_mode:
+                if not any(kw in line_lower for kw in year_keywords):
+                    continue
+
+            event = self._parse_event_text(line)
+            if event:
+                title_lower = event.get('title', '').lower()
+
+                # Skip if title is too short or generic
+                if len(event.get('title', '')) < 5:
+                    continue
+
+                # Skip if title is just a number or ordinal
+                if re.match(r'^(open|closed|\d+(st|nd|rd|th)?)\s*(&|and)?\s*$', title_lower):
+                    continue
+
+                # In non-strict mode, prefer events with meaningful keywords
+                # but still accept others from Sway pages
+                if not strict_mode or any(kw in title_lower for kw in event_keywords):
+                    events.append(event)
+                elif any(kw in line_lower for kw in year_keywords):
+                    # Accept if it mentions a year group even without event keywords
                     events.append(event)
 
         return events
