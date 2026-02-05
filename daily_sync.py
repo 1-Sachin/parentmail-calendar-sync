@@ -370,38 +370,34 @@ class ParentMailScraper:
             if 'pmx.parentmail.co.uk' in self.page.url:
                 logger.info("Redirected to ParentMail domain")
 
-                # Handle cookie banner again (may appear after redirect)
+                # Handle cookie banner (may appear after redirect)
                 self.handle_cookie_banner()
                 self.page.wait_for_timeout(2000)
 
-                # Navigate to home page to ensure session is established
-                self.page.goto(f"{PARENTMAIL_URL}")
-                self.page.wait_for_load_state('networkidle')
-                self.page.wait_for_timeout(2000)
-
-                # Handle cookie banner again
-                self.handle_cookie_banner()
-                self.page.wait_for_timeout(1000)
-
-                self.page.screenshot(path='step8_parentmail_home_after_login.png')
-                logger.info(f"ParentMail home after login, URL: {self.page.url}")
+                self.page.screenshot(path='step8_parentmail_after_login.png')
+                logger.info(f"ParentMail after login, URL: {self.page.url}")
 
                 # Check if we're ACTUALLY logged in by looking at page content
                 page_text = self.page.locator('body').inner_text()
-                logger.info(f"Home page content (first 500 chars): {page_text[:500]}")
+                logger.info(f"Page content after login (first 500 chars): {page_text[:500]}")
 
-                # If we see "To Register" or only see login page, we're NOT logged in
+                # If we landed on a valid page (emails, feed, etc.), we're logged in!
+                if '/web/' in self.page.url or '/feed' in self.page.url or '/emails' in self.page.url:
+                    logger.info("Login successful - landed on authenticated page!")
+                    return True
+
+                # Look for signs we're logged in (emails link, dashboard, etc.)
+                if 'Emails' in page_text or 'Messages' in page_text or 'Dashboard' in page_text or 'Sachin' in page_text:
+                    logger.info("Login successful - found dashboard elements!")
+                    return True
+
+                # If we see "To Register" or login page content, we're NOT logged in
                 if 'To Register' in page_text or 'follow the link' in page_text.lower():
                     logger.error("Not actually logged in - still seeing registration page")
                     self.page.screenshot(path='login_not_actually_working.png')
                     return False
 
-                # Look for signs we're logged in (emails link, dashboard, etc.)
-                if 'Emails' in page_text or 'Messages' in page_text or 'Dashboard' in page_text:
-                    logger.info("Login successful - found dashboard elements!")
-                    return True
-
-                # URL check - if still on login page, not logged in
+                # URL check - if on login page, not logged in
                 if '#core/login' in self.page.url:
                     logger.error("Still on login page - login failed")
                     return False
@@ -509,29 +505,37 @@ class ParentMailScraper:
         all_events = []
 
         try:
+            # Check if we're already on an emails page
+            current_url = self.page.url
+            if '/emails' in current_url or '/feed' in current_url or '/messages' in current_url:
+                logger.info(f"Already on emails page: {current_url}")
+                page_loaded = True
+            else:
+                page_loaded = False
+
             # Try different URL patterns for emails section
             email_urls = [
+                f"{PARENTMAIL_URL}/web/feed-list/emails",  # This is the URL we see after login!
                 f"{PARENTMAIL_URL}/#/messages/emails",
                 f"{PARENTMAIL_URL}/ui/#/messages/emails",
                 f"{PARENTMAIL_URL}/#messages/emails",
-                f"{PARENTMAIL_URL}/messages",
             ]
 
-            page_loaded = False
-            for url in email_urls:
-                logger.info(f"Trying emails URL: {url}")
-                self.page.goto(url)
-                self.page.wait_for_load_state('networkidle')
-                self.page.wait_for_timeout(3000)
+            if not page_loaded:
+                for url in email_urls:
+                    logger.info(f"Trying emails URL: {url}")
+                    self.page.goto(url)
+                    self.page.wait_for_load_state('networkidle')
+                    self.page.wait_for_timeout(3000)
 
-                # Check if we got a valid page (not 404)
-                page_text = self.page.locator('body').inner_text()
-                if '404' not in page_text and 'Not Found' not in page_text:
-                    logger.info(f"Successfully loaded emails page at: {url}")
-                    page_loaded = True
-                    break
-                else:
-                    logger.warning(f"Got 404 at {url}, trying next...")
+                    # Check if we got a valid page (not 404 or login page)
+                    page_text = self.page.locator('body').inner_text()
+                    if '404' not in page_text and 'Not Found' not in page_text and 'To Register' not in page_text:
+                        logger.info(f"Successfully loaded emails page at: {url}")
+                        page_loaded = True
+                        break
+                    else:
+                        logger.warning(f"Page at {url} not valid, trying next...")
 
             # Handle any cookie banners that appeared
             self.handle_cookie_banner()
