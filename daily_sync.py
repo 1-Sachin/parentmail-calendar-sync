@@ -263,6 +263,68 @@ class ParentMailScraper:
                 except:
                     continue
 
+            # Wait for potential "Stay signed in?" prompt
+            self.page.wait_for_timeout(3000)
+            self.page.wait_for_load_state('networkidle')
+
+            # Handle IRIS "Keep me signed in for the rest of the day" prompt
+            logger.info("Checking for 'Stay signed in' prompt...")
+            self.page.screenshot(path='step6b_checking_stay_signed_in.png')
+
+            # Log what's on the page
+            page_content = self.page.locator('body').inner_text()
+            logger.info(f"Page content after password submit: {page_content[:500]}")
+
+            try:
+                # Look for the specific IRIS "Stay signed in" button
+                stay_signed_in_selectors = [
+                    'button:has-text("Stay signed in")',
+                    'text="Stay signed in"',
+                    'button:text-is("Stay signed in")',
+                    'button >> text="Stay signed in"',
+                    'button:has-text("Don\'t stay signed in")',  # Either button works
+                ]
+
+                clicked = False
+                for selector in stay_signed_in_selectors:
+                    try:
+                        btn = self.page.locator(selector).first
+                        if btn.is_visible(timeout=3000):
+                            btn.click()
+                            logger.info(f"Clicked 'Stay signed in' button: {selector}")
+                            clicked = True
+                            self.page.wait_for_timeout(3000)
+                            break
+                    except Exception as e:
+                        logger.debug(f"Selector {selector} didn't work: {e}")
+                        continue
+
+                if not clicked:
+                    # Try a more generic approach - find any button on the page
+                    logger.info("Trying generic button search...")
+                    buttons = self.page.locator('button').all()
+                    logger.info(f"Found {len(buttons)} buttons on page")
+                    for btn in buttons:
+                        try:
+                            btn_text = btn.inner_text()
+                            logger.info(f"Button found: '{btn_text}'")
+                            if 'stay signed in' in btn_text.lower() or 'sign' in btn_text.lower():
+                                btn.click()
+                                logger.info(f"Clicked button with text: {btn_text}")
+                                clicked = True
+                                self.page.wait_for_timeout(3000)
+                                break
+                        except:
+                            continue
+
+                if not clicked:
+                    logger.warning("Could not find 'Stay signed in' button - continuing anyway")
+
+            except Exception as e:
+                logger.warning(f"Error handling 'stay signed in' prompt: {e}")
+
+            self.page.screenshot(path='step6b_after_stay_signed_in.png')
+
             # Wait for redirect back to ParentMail - may take a while
             logger.info("Waiting for redirect back to ParentMail...")
 
