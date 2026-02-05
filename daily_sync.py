@@ -75,6 +75,38 @@ class ParentMailScraper:
         if self.playwright:
             self.playwright.stop()
 
+    def handle_cookie_banner(self):
+        """Handle cookie consent banner if present."""
+        try:
+            # Look for common cookie accept/reject buttons
+            cookie_selectors = [
+                'button:has-text("Accept")',
+                'button:has-text("Reject")',
+                'button:has-text("Accept All")',
+                'button:has-text("Accept Cookies")',
+                '[id*="cookie"] button',
+                '[class*="cookie"] button',
+                'button[id*="accept"]',
+                'button[id*="reject"]',
+            ]
+
+            for selector in cookie_selectors:
+                try:
+                    btn = self.page.locator(selector).first
+                    if btn.is_visible(timeout=2000):
+                        # Prefer reject for privacy, but accept works too
+                        btn.click()
+                        logger.info(f"Clicked cookie banner button: {selector}")
+                        self.page.wait_for_timeout(1000)
+                        return True
+                except:
+                    continue
+
+            return False
+        except Exception as e:
+            logger.warning(f"Error handling cookie banner: {e}")
+            return False
+
     def login(self) -> bool:
         """Log into ParentMail via IRIS OAuth flow."""
         logger.info("Logging into ParentMail...")
@@ -83,6 +115,11 @@ class ParentMailScraper:
             self.page.goto(PARENTMAIL_URL)
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(2000)
+
+            # Handle cookie consent banner if present
+            self.handle_cookie_banner()
+            self.page.wait_for_timeout(1000)
+
             self.page.screenshot(path='step1_parentmail_home.png')
             logger.info(f"Step 1 - ParentMail home, URL: {self.page.url}")
 
@@ -246,15 +283,45 @@ class ParentMailScraper:
 
             # Check if login was successful
             if 'pmx.parentmail.co.uk' in self.page.url:
-                logger.info("Login successful - on ParentMail!")
+                logger.info("Redirected to ParentMail domain")
+
+                # Handle cookie banner again (may appear after redirect)
+                self.handle_cookie_banner()
+                self.page.wait_for_timeout(2000)
 
                 # Navigate to home page to ensure session is established
                 self.page.goto(f"{PARENTMAIL_URL}")
                 self.page.wait_for_load_state('networkidle')
                 self.page.wait_for_timeout(2000)
+
+                # Handle cookie banner again
+                self.handle_cookie_banner()
+                self.page.wait_for_timeout(1000)
+
                 self.page.screenshot(path='step8_parentmail_home_after_login.png')
                 logger.info(f"ParentMail home after login, URL: {self.page.url}")
 
+                # Check if we're ACTUALLY logged in by looking at page content
+                page_text = self.page.locator('body').inner_text()
+                logger.info(f"Home page content (first 500 chars): {page_text[:500]}")
+
+                # If we see "To Register" or only see login page, we're NOT logged in
+                if 'To Register' in page_text or 'follow the link' in page_text.lower():
+                    logger.error("Not actually logged in - still seeing registration page")
+                    self.page.screenshot(path='login_not_actually_working.png')
+                    return False
+
+                # Look for signs we're logged in (emails link, dashboard, etc.)
+                if 'Emails' in page_text or 'Messages' in page_text or 'Dashboard' in page_text:
+                    logger.info("Login successful - found dashboard elements!")
+                    return True
+
+                # URL check - if still on login page, not logged in
+                if '#core/login' in self.page.url:
+                    logger.error("Still on login page - login failed")
+                    return False
+
+                logger.info("Login appears successful")
                 return True
 
             # Alternative check: look for dashboard elements
@@ -381,6 +448,10 @@ class ParentMailScraper:
                 else:
                     logger.warning(f"Got 404 at {url}, trying next...")
 
+            # Handle any cookie banners that appeared
+            self.handle_cookie_banner()
+            self.page.wait_for_timeout(1000)
+
             if not page_loaded:
                 # Try clicking on Emails link from current page
                 logger.info("Trying to find and click Emails link...")
@@ -390,6 +461,7 @@ class ParentMailScraper:
                         emails_link.click()
                         self.page.wait_for_load_state('networkidle')
                         self.page.wait_for_timeout(2000)
+                        self.handle_cookie_banner()
                         logger.info(f"Clicked Emails link, now at: {self.page.url}")
                 except Exception as e:
                     logger.warning(f"Could not find Emails link: {e}")
