@@ -917,7 +917,11 @@ class ParentMailScraper:
                 
                 # Sway's content is inside a scrollable div, so full_page=True only
                 # captures the outer page (720px viewport). We need to scroll through
-                # the inner container and take viewport screenshots at each position.
+                # the inner container and take viewport screenshots.
+                #
+                # The diary dates table is typically in the bottom third of the newsletter.
+                # To keep API costs low and improve accuracy, we only screenshot the 
+                # bottom 60% of the page (skipping headers, news sections at the top).
                 screenshot_paths = []
                 
                 if scroll_info.get('found') and scroll_info['selector'] != 'document':
@@ -925,11 +929,13 @@ class ParentMailScraper:
                     container_height = scroll_info['scrollHeight']
                     view_height = scroll_info['clientHeight']
                     
-                    logger.info(f"Taking screenshots while scrolling through container ({container_height}px)")
+                    # Start from 40% down the page to skip newsletter header/body
+                    start_position = int(container_height * 0.4)
+                    # Use larger steps with slight overlap
+                    step = int(view_height * 0.9)
+                    positions = list(range(start_position, container_height, step))
                     
-                    # Calculate number of screenshots needed (overlap by 10% to avoid missing content)
-                    step = int(view_height * 0.85)
-                    positions = list(range(0, container_height, step))
+                    logger.info(f"Taking screenshots from position {start_position}px to {container_height}px ({len(positions)} screenshots)")
                     
                     for i, pos in enumerate(positions):
                         # Scroll the container to this position
@@ -952,7 +958,7 @@ class ParentMailScraper:
                         screenshot_paths.append(path)
                         logger.info(f"Screenshot {i+1}/{len(positions)}: scroll position {pos}px")
                     
-                    logger.info(f"Took {len(screenshot_paths)} screenshots covering the full newsletter")
+                    logger.info(f"Took {len(screenshot_paths)} screenshots of diary dates area")
                 else:
                     # Fallback: just take a single full-page screenshot
                     path = 'sway_full_page.png'
@@ -1026,7 +1032,7 @@ If you cannot find a diary dates table in any of the images, return an empty arr
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
             message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=4096,
                 messages=[
                     {
