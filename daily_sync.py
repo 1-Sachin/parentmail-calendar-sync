@@ -929,13 +929,21 @@ class ParentMailScraper:
                     container_height = scroll_info['scrollHeight']
                     view_height = scroll_info['clientHeight']
                     
-                    # Use large steps to cover the full page in ~5-6 screenshots
-                    # No overlap needed - we just need the diary dates visible somewhere
-                    num_screenshots = 6
-                    step = container_height // num_screenshots
-                    positions = [i * step for i in range(num_screenshots)]
+                    # Take viewport-sized screenshots with overlap, covering the full page
+                    # Each screenshot captures 720px, step by 650px for 10% overlap
+                    step = max(int(view_height * 0.9), 1)
+                    positions = list(range(0, container_height, step))
                     
-                    logger.info(f"Taking {num_screenshots} screenshots across full page ({container_height}px, step={step}px)")
+                    # If too many screenshots (>20), increase step size
+                    if len(positions) > 20:
+                        step = container_height // 15
+                        positions = list(range(0, container_height, step))
+                    
+                    # Take viewport-sized screenshots covering the full page
+                    step = max(int(view_height * 0.95), 1)
+                    positions = list(range(0, container_height, step))
+                    
+                    logger.info(f"Taking {len(positions)} screenshots across full page ({container_height}px, step={step}px, viewport={view_height}px)")
                     
                     for i, pos in enumerate(positions):
                         # Scroll the container to this position
@@ -956,9 +964,41 @@ class ParentMailScraper:
                         path = f'sway_section_{i}.png'
                         self.page.screenshot(path=path)
                         screenshot_paths.append(path)
-                        logger.info(f"Screenshot {i+1}/{num_screenshots}: scroll position {pos}px")
+                        logger.info(f"Screenshot {i+1}/{len(positions)}: scroll position {pos}px")
                     
                     logger.info(f"Took {len(screenshot_paths)} screenshots across the newsletter")
+                    
+                    # Stitch all screenshots into one tall image
+                    # This gives the vision API a single complete view of the newsletter
+                    try:
+                        from PIL import Image
+                        images = [Image.open(p) for p in screenshot_paths]
+                        widths = [img.width for img in images]
+                        heights = [img.height for img in images]
+                        
+                        total_width = max(widths)
+                        total_height = sum(heights)
+                        
+                        stitched = Image.new('RGB', (total_width, total_height))
+                        y_offset = 0
+                        for img in images:
+                            stitched.paste(img, (0, y_offset))
+                            y_offset += img.height
+                        
+                        stitched_path = 'sway_stitched.png'
+                        stitched.save(stitched_path, optimize=True)
+                        stitched_size = os.path.getsize(stitched_path)
+                        logger.info(f"Stitched {len(images)} screenshots into {stitched_path} ({stitched_size} bytes, {total_width}x{total_height})")
+                        
+                        # Send just the single stitched image
+                        screenshot_paths = [stitched_path]
+                        
+                        for img in images:
+                            img.close()
+                    except ImportError:
+                        logger.warning("PIL not available - sending individual screenshots")
+                    except Exception as e:
+                        logger.warning(f"Failed to stitch screenshots: {e} - sending individual screenshots")
                 else:
                     # Fallback: just take a single full-page screenshot
                     path = 'sway_full_page.png'
