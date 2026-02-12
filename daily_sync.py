@@ -739,9 +739,10 @@ class ParentMailScraper:
         
         The diary dates are embedded as an IMAGE in Sway, so we can't extract text
         from HTML. Instead we:
-        1. Take a full-page screenshot of the Sway page
-        2. Send it to Claude's Vision API to extract the diary dates table
-        3. Parse the structured response into events
+        1. Scroll through the entire Sway page to force lazy-loaded images to render
+        2. Take screenshots of the page (sectioned if needed)
+        3. Send to Claude's Vision API to extract the diary dates table
+        4. Parse the structured response into events
         """
         logger.info(f"Scraping Sway page: {sway_url}")
 
@@ -752,17 +753,36 @@ class ParentMailScraper:
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(5000)  # Give Sway extra time to render
 
-            # Scroll down to ensure diary dates image is loaded
-            # Diary dates are typically towards the bottom of the newsletter
+            # Sway uses lazy loading - we MUST scroll through the entire page
+            # to force all images (including diary dates) to load
+            logger.info("Scrolling through Sway page to load all content...")
+            
+            # Get total page height
+            total_height = self.page.evaluate('document.body.scrollHeight')
+            viewport_height = self.page.evaluate('window.innerHeight')
+            logger.info(f"Page height: {total_height}px, viewport: {viewport_height}px")
+            
+            # Scroll down incrementally to trigger lazy loading
+            scroll_position = 0
+            scroll_step = viewport_height // 2  # Scroll half a viewport at a time
+            while scroll_position < total_height:
+                self.page.evaluate(f'window.scrollTo(0, {scroll_position})')
+                self.page.wait_for_timeout(800)  # Wait for images to load
+                scroll_position += scroll_step
+                # Page height may increase as content loads
+                total_height = self.page.evaluate('document.body.scrollHeight')
+            
+            # Final scroll to absolute bottom and wait
             self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
             self.page.wait_for_timeout(2000)
+            
+            # Scroll back to top
             self.page.evaluate('window.scrollTo(0, 0)')
             self.page.wait_for_timeout(1000)
 
-            # Take a full-page screenshot
-            screenshot_path = 'sway_full_page.png'
-            self.page.screenshot(path=screenshot_path, full_page=True)
-            logger.info(f"Saved full-page screenshot: {screenshot_path}")
+            # Get final page height after all content loaded
+            final_height = self.page.evaluate('document.body.scrollHeight')
+            logger.info(f"Final page height after scrolling: {final_height}px")
 
             # Method 1: Try standard HTML table extraction first (in case format changes)
             rows = self.page.locator('table tr, [role="row"]').all()
@@ -782,6 +802,25 @@ class ParentMailScraper:
             # Method 2: Use Claude Vision API to read the diary dates image
             if not events:
                 logger.info("No HTML table found - using Claude Vision API to read diary dates image")
+                
+                # Take a full-page screenshot
+                screenshot_path = 'sway_full_page.png'
+                self.page.screenshot(path=screenshot_path, full_page=True)
+                screenshot_size = os.path.getsize(screenshot_path)
+                logger.info(f"Saved full-page screenshot: {screenshot_path} ({screenshot_size} bytes)")
+                
+                # If the full-page screenshot is very large (>5MB), the image might be 
+                # too big for the API. Take sectioned screenshots of the bottom half 
+                # where diary dates typically are
+                if screenshot_size > 5 * 1024 * 1024:
+                    logger.info("Screenshot too large - taking bottom section only")
+                    # Scroll to bottom half of page where diary dates usually are
+                    self.page.evaluate(f'window.scrollTo(0, {final_height // 2})')
+                    self.page.wait_for_timeout(1000)
+                    screenshot_path = 'sway_bottom_section.png'
+                    self.page.screenshot(path=screenshot_path)
+                    logger.info(f"Saved bottom section screenshot: {screenshot_path}")
+                
                 events = self._extract_events_with_vision(screenshot_path)
 
             logger.info(f"Found {len(events)} events in Sway page")
@@ -852,13 +891,22 @@ If you cannot find a diary dates table, return an empty array: []"""
             response_text = message.content[0].text.strip()
             logger.info(f"Claude Vision API response (first 500 chars): {response_text[:500]}")
 
-            # Clean up response - remove markdown code fences if present
-            response_text = re.sub(r'^```json\s*', '', response_text)
-            response_text = re.sub(r'\s*```$', '', response_text)
-            response_text = response_text.strip()
+            # Extract JSON array from response - Claude may include text before/after the JSON
+            # Try to find a JSON array in the response
+            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            if not json_match:
+                logger.error("No JSON array found in Claude Vision API response")
+                return []
+            
+            json_text = json_match.group()
+            
+            # Clean up - remove markdown code fences if they got captured
+            json_text = re.sub(r'```json\s*', '', json_text)
+            json_text = re.sub(r'\s*```', '', json_text)
+            json_text = json_text.strip()
 
             # Parse JSON
-            raw_events = json.loads(response_text)
+            raw_events = json.loads(json_text)
             logger.info(f"Parsed {len(raw_events)} events from Claude Vision API")
 
             # Convert to our event format
