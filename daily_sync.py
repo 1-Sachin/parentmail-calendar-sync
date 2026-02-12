@@ -753,34 +753,146 @@ class ParentMailScraper:
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(5000)  # Give Sway extra time to render
 
-            # Sway uses lazy loading - we MUST scroll through the entire page
-            # to force all images (including diary dates) to load
+            # Sway uses lazy loading and its own scrollable container
+            # We need to find the actual scrollable element and scroll within it
             logger.info("Scrolling through Sway page to load all content...")
             
-            # Get total page height
-            total_height = self.page.evaluate('document.body.scrollHeight')
-            viewport_height = self.page.evaluate('window.innerHeight')
-            logger.info(f"Page height: {total_height}px, viewport: {viewport_height}px")
+            # Sway typically uses a main scrollable container - try common selectors
+            scroll_js = """
+            () => {
+                // Try to find Sway's scrollable container
+                const selectors = [
+                    '[class*="scroll"]',
+                    '[class*="Scroll"]', 
+                    '[style*="overflow"]',
+                    'main',
+                    '[role="main"]',
+                    '.content',
+                    '#sway-content',
+                    '[class*="canvas"]',
+                    '[class*="Canvas"]',
+                    '[class*="container"]',
+                    '[class*="Container"]',
+                ];
+                
+                for (const sel of selectors) {
+                    const elements = document.querySelectorAll(sel);
+                    for (const el of elements) {
+                        if (el.scrollHeight > el.clientHeight + 100) {
+                            return {
+                                selector: sel,
+                                scrollHeight: el.scrollHeight,
+                                clientHeight: el.clientHeight,
+                                found: true
+                            };
+                        }
+                    }
+                }
+                
+                // Fallback: check if document itself scrolls
+                if (document.documentElement.scrollHeight > window.innerHeight + 100) {
+                    return {
+                        selector: 'document',
+                        scrollHeight: document.documentElement.scrollHeight,
+                        clientHeight: window.innerHeight,
+                        found: true
+                    };
+                }
+                
+                return { found: false, bodyHeight: document.body.scrollHeight, windowHeight: window.innerHeight };
+            }
+            """
             
-            # Scroll down incrementally to trigger lazy loading
-            scroll_position = 0
-            scroll_step = viewport_height // 2  # Scroll half a viewport at a time
-            while scroll_position < total_height:
-                self.page.evaluate(f'window.scrollTo(0, {scroll_position})')
-                self.page.wait_for_timeout(800)  # Wait for images to load
-                scroll_position += scroll_step
-                # Page height may increase as content loads
-                total_height = self.page.evaluate('document.body.scrollHeight')
+            scroll_info = self.page.evaluate(scroll_js)
+            logger.info(f"Scroll container info: {scroll_info}")
             
-            # Final scroll to absolute bottom and wait
-            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            self.page.wait_for_timeout(2000)
-            
-            # Scroll back to top
-            self.page.evaluate('window.scrollTo(0, 0)')
-            self.page.wait_for_timeout(1000)
+            if scroll_info.get('found'):
+                selector = scroll_info['selector']
+                total_height = scroll_info['scrollHeight']
+                viewport_height = scroll_info['clientHeight']
+                logger.info(f"Found scrollable container: {selector} (height: {total_height}px, viewport: {viewport_height}px)")
+                
+                # Scroll incrementally through the container
+                scroll_step = viewport_height // 2
+                scroll_position = 0
+                
+                while scroll_position < total_height:
+                    if selector == 'document':
+                        self.page.evaluate(f'window.scrollTo(0, {scroll_position})')
+                    else:
+                        self.page.evaluate(f"""
+                        () => {{
+                            const els = document.querySelectorAll('{selector}');
+                            for (const el of els) {{
+                                if (el.scrollHeight > el.clientHeight + 100) {{
+                                    el.scrollTop = {scroll_position};
+                                    break;
+                                }}
+                            }}
+                        }}
+                        """)
+                    self.page.wait_for_timeout(800)
+                    scroll_position += scroll_step
+                    
+                    # Update total height as content may load dynamically
+                    if selector == 'document':
+                        total_height = self.page.evaluate('document.documentElement.scrollHeight')
+                    else:
+                        total_height = self.page.evaluate(f"""
+                        () => {{
+                            const els = document.querySelectorAll('{selector}');
+                            for (const el of els) {{
+                                if (el.scrollHeight > el.clientHeight + 100) return el.scrollHeight;
+                            }}
+                            return 0;
+                        }}
+                        """)
+                
+                # Scroll to bottom and wait for final content
+                if selector == 'document':
+                    self.page.evaluate('window.scrollTo(0, document.documentElement.scrollHeight)')
+                else:
+                    self.page.evaluate(f"""
+                    () => {{
+                        const els = document.querySelectorAll('{selector}');
+                        for (const el of els) {{
+                            if (el.scrollHeight > el.clientHeight + 100) {{
+                                el.scrollTop = el.scrollHeight;
+                                break;
+                            }}
+                        }}
+                    }}
+                    """)
+                self.page.wait_for_timeout(3000)
+                
+                # Scroll back to top
+                if selector == 'document':
+                    self.page.evaluate('window.scrollTo(0, 0)')
+                else:
+                    self.page.evaluate(f"""
+                    () => {{
+                        const els = document.querySelectorAll('{selector}');
+                        for (const el of els) {{
+                            if (el.scrollHeight > el.clientHeight + 100) {{
+                                el.scrollTop = 0;
+                                break;
+                            }}
+                        }}
+                    }}
+                    """)
+                self.page.wait_for_timeout(1000)
+            else:
+                logger.warning(f"No scrollable container found: {scroll_info}")
+                # Try keyboard scrolling as fallback
+                logger.info("Trying keyboard-based scrolling...")
+                for i in range(20):
+                    self.page.keyboard.press('PageDown')
+                    self.page.wait_for_timeout(500)
+                self.page.wait_for_timeout(2000)
+                # Scroll back to top
+                self.page.keyboard.press('Home')
+                self.page.wait_for_timeout(1000)
 
-            # Get final page height after all content loaded
             final_height = self.page.evaluate('document.body.scrollHeight')
             logger.info(f"Final page height after scrolling: {final_height}px")
 
