@@ -912,110 +912,146 @@ class ParentMailScraper:
                         continue
 
             # Method 2: Use Claude Vision API to read the diary dates image
+            # The diary dates are an IMAGE embedded in the Sway page.
+            # Strategy: Find the actual diary dates image element, screenshot it directly.
             if not events:
-                logger.info("No HTML table found - using Claude Vision API to read diary dates image")
+                logger.info("No HTML table found - looking for diary dates image")
                 
-                # Sway's content is inside a scrollable div, so full_page=True only
-                # captures the outer page (720px viewport). We need to scroll through
-                # the inner container and take viewport screenshots.
-                #
-                # Strategy: Take screenshots of the FULL page but limit to ~5 images
-                # by using large scroll steps. This ensures we capture the diary dates
-                # table wherever it appears, while keeping the API call manageable.
-                screenshot_paths = []
+                screenshot_path = None
                 
                 if scroll_info.get('found') and scroll_info['selector'] != 'document':
                     selector = scroll_info['selector']
                     container_height = scroll_info['scrollHeight']
-                    view_height = scroll_info['clientHeight']
                     
-                    # Take viewport-sized screenshots with overlap, covering the full page
-                    # Each screenshot captures 720px, step by 650px for 10% overlap
-                    step = max(int(view_height * 0.9), 1)
-                    positions = list(range(0, container_height, step))
+                    # Find all images on the page
+                    all_images = self.page.locator('img').all()
+                    logger.info(f"Found {len(all_images)} images on the page")
                     
-                    # If too many screenshots (>20), increase step size
-                    if len(positions) > 20:
-                        step = container_height // 15
-                        positions = list(range(0, container_height, step))
+                    # Log image details for debugging
+                    for idx, img in enumerate(all_images):
+                        try:
+                            src = img.get_attribute('src') or ''
+                            alt = img.get_attribute('alt') or ''
+                            box = img.bounding_box()
+                            if box:
+                                logger.info(f"Image {idx}: {box['width']:.0f}x{box['height']:.0f}px, alt='{alt[:50]}', src='{src[:80]}'")
+                        except:
+                            pass
                     
-                    # Take viewport-sized screenshots covering the full page
-                    step = max(int(view_height * 0.95), 1)
-                    positions = list(range(0, container_height, step))
+                    diary_image = None
                     
-                    logger.info(f"Taking {len(positions)} screenshots across full page ({container_height}px, step={step}px, viewport={view_height}px)")
+                    # Strategy 1: Look for image with "diary" in alt text or nearby text
+                    for img in all_images:
+                        try:
+                            alt = (img.get_attribute('alt') or '').lower()
+                            title = (img.get_attribute('title') or '').lower()
+                            if 'diary' in alt or 'dates' in alt or 'diary' in title:
+                                diary_image = img
+                                logger.info(f"Found diary dates image by alt/title text")
+                                break
+                        except:
+                            continue
                     
-                    for i, pos in enumerate(positions):
-                        # Scroll the container to this position
-                        self.page.evaluate(f"""
-                        () => {{
-                            const els = document.querySelectorAll('{selector}');
-                            for (const el of els) {{
-                                if (el.scrollHeight > el.clientHeight + 100) {{
-                                    el.scrollTop = {pos};
-                                    break;
-                                }}
-                            }}
-                        }}
-                        """)
-                        self.page.wait_for_timeout(800)
+                    # Strategy 2: Find the last large image (diary dates is usually last)
+                    if not diary_image:
+                        logger.info("Trying to find last large image on page")
+                        large_images = []
+                        for img in all_images:
+                            try:
+                                box = img.bounding_box()
+                                if box and box['width'] > 300 and box['height'] > 200:
+                                    large_images.append((img, box))
+                            except:
+                                continue
                         
-                        # Take a viewport screenshot
-                        path = f'sway_section_{i}.png'
-                        self.page.screenshot(path=path)
-                        screenshot_paths.append(path)
-                        logger.info(f"Screenshot {i+1}/{len(positions)}: scroll position {pos}px")
+                        if large_images:
+                            # Use the last large image
+                            diary_image, box = large_images[-1]
+                            logger.info(f"Using last large image ({box['width']:.0f}x{box['height']:.0f}px)")
                     
-                    logger.info(f"Took {len(screenshot_paths)} screenshots across the newsletter")
-                    
-                    # Stitch all screenshots into one tall image
-                    # This gives the vision API a single complete view of the newsletter
-                    try:
-                        from PIL import Image
-                        images = [Image.open(p) for p in screenshot_paths]
-                        widths = [img.width for img in images]
-                        heights = [img.height for img in images]
+                    if diary_image:
+                        # Scroll the image into view
+                        try:
+                            diary_image.scroll_into_view_if_needed()
+                            self.page.wait_for_timeout(1500)
+                        except:
+                            pass
                         
-                        total_width = max(widths)
-                        total_height = sum(heights)
+                        # Try clicking to enlarge (Sway often has lightbox/zoom)
+                        enlarged = False
+                        try:
+                            diary_image.click()
+                            self.page.wait_for_timeout(2000)
+                            
+                            # Check if a lightbox/modal/enlarged view opened
+                            lightbox_selectors = [
+                                '[class*="lightbox"]', '[class*="Lightbox"]',
+                                '[class*="modal"]', '[class*="Modal"]', 
+                                '[class*="overlay"]', '[class*="Overlay"]',
+                                '[class*="zoom"]', '[class*="Zoom"]',
+                                '[class*="expanded"]', '[class*="Expanded"]',
+                                '[role="dialog"]',
+                                '[class*="fullscreen"]', '[class*="Fullscreen"]',
+                            ]
+                            for lb_sel in lightbox_selectors:
+                                try:
+                                    lb = self.page.locator(lb_sel).first
+                                    if lb.is_visible(timeout=1000):
+                                        logger.info(f"Lightbox opened with selector: {lb_sel}")
+                                        screenshot_path = 'diary_dates_enlarged.png'
+                                        self.page.screenshot(path=screenshot_path)
+                                        enlarged = True
+                                        break
+                                except:
+                                    continue
+                            
+                            if not enlarged:
+                                # Check if a larger image appeared
+                                enlarged_img = self.page.locator('img[class*="expanded"], img[class*="zoom"], img[class*="full"]').first
+                                try:
+                                    if enlarged_img.is_visible(timeout=1000):
+                                        screenshot_path = 'diary_dates_enlarged.png'
+                                        enlarged_img.screenshot(path=screenshot_path)
+                                        enlarged = True
+                                        logger.info("Found enlarged image element")
+                                except:
+                                    pass
+                        except Exception as e:
+                            logger.info(f"Click to enlarge failed: {e}")
                         
-                        stitched = Image.new('RGB', (total_width, total_height))
-                        y_offset = 0
-                        for img in images:
-                            stitched.paste(img, (0, y_offset))
-                            y_offset += img.height
+                        if not enlarged:
+                            # Just screenshot the image element directly
+                            logger.info("No lightbox - screenshotting image element directly")
+                            try:
+                                screenshot_path = 'diary_dates_direct.png'
+                                diary_image.screenshot(path=screenshot_path)
+                            except Exception as e:
+                                logger.warning(f"Element screenshot failed: {e}")
+                                # Fallback: screenshot the viewport with the image visible
+                                screenshot_path = 'diary_dates_viewport.png'
+                                self.page.screenshot(path=screenshot_path)
                         
-                        # Resize if exceeds API limit of 8000px on any dimension
-                        max_dimension = 7900  # Leave a small margin
-                        if total_height > max_dimension or total_width > max_dimension:
-                            scale = min(max_dimension / total_height, max_dimension / total_width)
-                            new_width = int(total_width * scale)
-                            new_height = int(total_height * scale)
-                            stitched = stitched.resize((new_width, new_height), Image.LANCZOS)
-                            logger.info(f"Resized from {total_width}x{total_height} to {new_width}x{new_height}")
+                        # Close lightbox if it was opened (press Escape)
+                        if enlarged:
+                            try:
+                                self.page.keyboard.press('Escape')
+                                self.page.wait_for_timeout(500)
+                            except:
+                                pass
                         
-                        stitched_path = 'sway_stitched.png'
-                        stitched.save(stitched_path, optimize=True)
-                        stitched_size = os.path.getsize(stitched_path)
-                        logger.info(f"Stitched {len(images)} screenshots into {stitched_path} ({stitched_size} bytes, {total_width}x{total_height})")
-                        
-                        # Send just the single stitched image
-                        screenshot_paths = [stitched_path]
-                        
-                        for img in images:
-                            img.close()
-                    except ImportError:
-                        logger.warning("PIL not available - sending individual screenshots")
-                    except Exception as e:
-                        logger.warning(f"Failed to stitch screenshots: {e} - sending individual screenshots")
-                else:
-                    # Fallback: just take a single full-page screenshot
-                    path = 'sway_full_page.png'
-                    self.page.screenshot(path=path, full_page=True)
-                    screenshot_paths.append(path)
-                    logger.info(f"Saved full-page screenshot: {path}")
+                        img_size = os.path.getsize(screenshot_path)
+                        logger.info(f"Diary dates screenshot: {screenshot_path} ({img_size} bytes)")
+                    else:
+                        logger.warning("Could not find any diary dates image")
                 
-                events = self._extract_events_with_vision(screenshot_paths)
+                else:
+                    # No scrollable container found - take full page screenshot
+                    screenshot_path = 'sway_full_page.png'
+                    self.page.screenshot(path=screenshot_path, full_page=True)
+                    logger.info(f"Saved full-page screenshot: {screenshot_path}")
+                
+                if screenshot_path:
+                    events = self._extract_events_with_vision(screenshot_path)
 
             logger.info(f"Found {len(events)} events in Sway page")
             return events
