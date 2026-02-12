@@ -43,6 +43,7 @@ jobs:
           PARENTMAIL_EMAIL: ${{ secrets.PARENTMAIL_EMAIL }}
           PARENTMAIL_PASSWORD: ${{ secrets.PARENTMAIL_PASSWORD }}
           GOOGLE_CALENDAR_TOKEN: ${{ secrets.GOOGLE_CALENDAR_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NOTIFICATION_EMAIL: ${{ secrets.PARENTMAIL_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: |
