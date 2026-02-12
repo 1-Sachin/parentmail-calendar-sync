@@ -9,7 +9,8 @@ The automation:
 - Logs into ParentMail automatically
 - Finds the latest newsletter
 - Extracts school events from the Sway diary dates
-- Filters for relevant events (YR, Y2, KS1, Red class, Yellow class)
+- Filters for relevant events (YR, Y2, KS1, Red class, Yellow class, whole-school events, parent events)
+- Excludes other year groups (Y3-Y6, KS2) and other class assemblies (Orange, Green, Purple, Silver, Blue)
 - Syncs new events to your Google Calendar (avoiding duplicates)
 - Color-codes events by child (Orange=Arvi, Blue=Rivan, Red=Both)
 

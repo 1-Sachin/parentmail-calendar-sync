@@ -52,6 +52,7 @@ COLOR_BOTH = '11'   # Red for KS1/Both events
 # Event filtering keywords
 INCLUDE_KEYWORDS = ['yr', 'y2', 'ks1', 'red class', 'yellow class', 'reception', 'year 2']
 EXCLUDE_ONLY_KEYWORDS = ['ks2', 'y3', 'y4', 'y5', 'y6', 'year 3', 'year 4', 'year 5', 'year 6']
+EXCLUDE_CLASS_ASSEMBLIES = ['orange class', 'green class', 'blue class', 'purple class', 'silver class']
 
 
 class ParentMailScraper:
@@ -761,10 +762,28 @@ class ParentMailScraper:
                 except:
                     continue
 
-            # Method 2: Look for date patterns in text content
+            # Method 2: If no table rows found, try finding table-like structures
+            # IMPORTANT: Only extract from structured diary dates content, NOT free-form newsletter text
             if not events:
-                text_content = self.page.locator('body').inner_text()
-                events = self._extract_events_from_text(text_content)
+                logger.info("No table rows found - trying alternative table selectors")
+                alt_selectors = [
+                    'table', '[role="table"]', '[class*="table"]',
+                    '[class*="diary"]', '[class*="dates"]'
+                ]
+                for selector in alt_selectors:
+                    try:
+                        table_el = self.page.locator(selector).first
+                        if table_el.is_visible(timeout=2000):
+                            table_text = table_el.inner_text()
+                            events = self._extract_events_from_text(table_text)
+                            if events:
+                                logger.info(f"Found {len(events)} events from {selector}")
+                                break
+                    except:
+                        continue
+
+            # DO NOT fall back to extracting from full page body text
+            # This causes false positives from newsletter body content (e.g. "School on. we didn't win but we")
 
             logger.info(f"Found {len(events)} events in Sway page")
             return events
@@ -892,10 +911,24 @@ class EventFilter:
 
     @staticmethod
     def is_relevant(event: Dict) -> bool:
-        """Check if event is relevant for our children (YR, Y2, KS1)."""
+        """
+        Check if event is relevant for our children (YR, Y2, KS1).
+        
+        Rules:
+        - INCLUDE: Events mentioning YR, Y2, KS1, Red class, Yellow class
+        - INCLUDE: Whole-school events (no year group specified) e.g. World Book Day, 
+          Safer Internet Day, Parent Consultations, Parents working group
+        - EXCLUDE: KS2-only events
+        - EXCLUDE: Y3/Y4/Y5/Y6-only events
+        - EXCLUDE: Other class assemblies (Orange, Green, Blue, Purple, Silver)
+        """
         title = event.get('title', '').lower()
         raw = event.get('raw_text', '').lower()
         combined = f"{title} {raw}"
+
+        # FIRST: Exclude other class assemblies (Orange, Green, Blue, Purple, Silver)
+        if any(cls in combined for cls in EXCLUDE_CLASS_ASSEMBLIES):
+            return False
 
         # Check for include keywords
         has_include = any(kw in combined for kw in INCLUDE_KEYWORDS)
@@ -904,15 +937,16 @@ class EventFilter:
         has_exclude_only = any(kw in combined for kw in EXCLUDE_ONLY_KEYWORDS)
         has_any_include = any(kw in combined for kw in INCLUDE_KEYWORDS)
 
-        # Include if has our keywords, or exclude if only has other year groups
+        # Include if has our keywords
         if has_include:
             return True
+        # Exclude if only has other year groups
         if has_exclude_only and not has_any_include:
             return False
 
         # Include school-wide events that don't specify a year group
         if not any(f'y{i}' in combined or f'year {i}' in combined for i in range(1, 7)):
-            if not 'ks2' in combined:
+            if 'ks2' not in combined:
                 return True  # Likely school-wide event
 
         return False
