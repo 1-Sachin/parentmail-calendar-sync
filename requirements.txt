@@ -11,3 +11,6 @@ google-auth-httplib2>=0.1.1
 
 # Utilities
 python-dateutil>=2.8.2
+
+# Vision API for reading diary dates images
+anthropic>=0.40.0

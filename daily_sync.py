@@ -15,6 +15,7 @@ Children:
 import os
 import re
 import json
+import base64
 import logging
 import smtplib
 from email.mime.text import MIMEText
@@ -27,10 +28,14 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import anthropic
 
 # Email configuration
 NOTIFICATION_EMAIL = os.environ.get('NOTIFICATION_EMAIL', 'sachinsharma0787@gmail.com')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')  # Gmail App Password
+
+# Anthropic API for vision-based diary date extraction
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
 # Configure logging
 logging.basicConfig(
@@ -729,7 +734,15 @@ class ParentMailScraper:
             return None
 
     def scrape_sway_diary_dates(self, sway_url: str) -> List[Dict]:
-        """Scrape diary dates from the Sway page."""
+        """
+        Scrape diary dates from the Sway page.
+        
+        The diary dates are embedded as an IMAGE in Sway, so we can't extract text
+        from HTML. Instead we:
+        1. Take a full-page screenshot of the Sway page
+        2. Send it to Claude's Vision API to extract the diary dates table
+        3. Parse the structured response into events
+        """
         logger.info(f"Scraping Sway page: {sway_url}")
 
         events = []
@@ -737,59 +750,141 @@ class ParentMailScraper:
         try:
             self.page.goto(sway_url)
             self.page.wait_for_load_state('networkidle')
-            self.page.wait_for_timeout(3000)  # Give Sway time to fully render
+            self.page.wait_for_timeout(5000)  # Give Sway extra time to render
 
-            # Get all text content
-            content = self.page.content()
+            # Scroll down to ensure diary dates image is loaded
+            # Diary dates are typically towards the bottom of the newsletter
+            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            self.page.wait_for_timeout(2000)
+            self.page.evaluate('window.scrollTo(0, 0)')
+            self.page.wait_for_timeout(1000)
 
-            # Look for diary dates section
-            # Sway pages often have tables or structured content
+            # Take a full-page screenshot
+            screenshot_path = 'sway_full_page.png'
+            self.page.screenshot(path=screenshot_path, full_page=True)
+            logger.info(f"Saved full-page screenshot: {screenshot_path}")
 
-            # Try to find table rows with date information
-            # Common patterns: "Friday 30th January | Red class celebration assembly | 2:45pm"
-
-            # Method 1: Look for table cells
+            # Method 1: Try standard HTML table extraction first (in case format changes)
             rows = self.page.locator('table tr, [role="row"]').all()
-
-            for row in rows:
-                try:
-                    cells = row.locator('td, [role="cell"]').all()
-                    if len(cells) >= 2:
-                        text = ' '.join([cell.inner_text() for cell in cells])
-                        event = self._parse_event_text(text)
-                        if event:
-                            events.append(event)
-                except:
-                    continue
-
-            # Method 2: If no table rows found, try finding table-like structures
-            # IMPORTANT: Only extract from structured diary dates content, NOT free-form newsletter text
-            if not events:
-                logger.info("No table rows found - trying alternative table selectors")
-                alt_selectors = [
-                    'table', '[role="table"]', '[class*="table"]',
-                    '[class*="diary"]', '[class*="dates"]'
-                ]
-                for selector in alt_selectors:
+            if rows:
+                logger.info(f"Found {len(rows)} HTML table rows - trying text extraction")
+                for row in rows:
                     try:
-                        table_el = self.page.locator(selector).first
-                        if table_el.is_visible(timeout=2000):
-                            table_text = table_el.inner_text()
-                            events = self._extract_events_from_text(table_text)
-                            if events:
-                                logger.info(f"Found {len(events)} events from {selector}")
-                                break
+                        cells = row.locator('td, [role="cell"]').all()
+                        if len(cells) >= 2:
+                            text = ' '.join([cell.inner_text() for cell in cells])
+                            event = self._parse_event_text(text)
+                            if event:
+                                events.append(event)
                     except:
                         continue
 
-            # DO NOT fall back to extracting from full page body text
-            # This causes false positives from newsletter body content (e.g. "School on. we didn't win but we")
+            # Method 2: Use Claude Vision API to read the diary dates image
+            if not events:
+                logger.info("No HTML table found - using Claude Vision API to read diary dates image")
+                events = self._extract_events_with_vision(screenshot_path)
 
             logger.info(f"Found {len(events)} events in Sway page")
             return events
 
         except Exception as e:
             logger.error(f"Failed to scrape Sway: {e}")
+            return []
+
+    def _extract_events_with_vision(self, screenshot_path: str) -> List[Dict]:
+        """
+        Use Claude Vision API to extract diary dates from a screenshot.
+        The diary dates are displayed as an image/table in the Sway newsletter.
+        """
+        if not ANTHROPIC_API_KEY:
+            logger.error("ANTHROPIC_API_KEY not set - cannot use vision extraction")
+            return []
+
+        try:
+            # Read screenshot and encode as base64
+            with open(screenshot_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode('utf-8')
+
+            logger.info("Sending screenshot to Claude Vision API...")
+
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+            message = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4096,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": image_data
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": """Look at this school newsletter screenshot. Find the "Diary Dates" table/section.
+
+Extract EVERY event from the diary dates table and return them as a JSON array. Each event should have:
+- "date_text": the full date as shown (e.g. "Tuesday 10th February")
+- "title": the event name (e.g. "KS1 Welcome Wednesday")  
+- "time": the time shown (e.g. "8.40am-9.00am", "2.45pm", "All day")
+
+For multi-day events like "Monday 16th- Friday 20th March", use the start date as date_text and include the full date range in a "date_end" field.
+
+Return ONLY the JSON array, no other text. Example:
+[
+    {"date_text": "Tuesday 10th February", "title": "Safer Internet Day", "time": "All Day"},
+    {"date_text": "Wednesday 11th February", "title": "KS1 Welcome Wednesday", "time": "8.40am-9.00am"}
+]
+
+If you cannot find a diary dates table, return an empty array: []"""
+                            }
+                        ]
+                    }
+                ]
+            )
+
+            # Parse the response
+            response_text = message.content[0].text.strip()
+            logger.info(f"Claude Vision API response (first 500 chars): {response_text[:500]}")
+
+            # Clean up response - remove markdown code fences if present
+            response_text = re.sub(r'^```json\s*', '', response_text)
+            response_text = re.sub(r'\s*```$', '', response_text)
+            response_text = response_text.strip()
+
+            # Parse JSON
+            raw_events = json.loads(response_text)
+            logger.info(f"Parsed {len(raw_events)} events from Claude Vision API")
+
+            # Convert to our event format
+            events = []
+            for raw in raw_events:
+                event = {
+                    'date_text': raw.get('date_text', ''),
+                    'title': raw.get('title', ''),
+                    'time': raw.get('time', 'All day'),
+                    'raw_text': f"{raw.get('date_text', '')} {raw.get('title', '')} {raw.get('time', '')}",
+                }
+                if raw.get('date_end'):
+                    event['date_end_text'] = raw['date_end']
+
+                if event['title'] and event['date_text']:
+                    events.append(event)
+                    logger.info(f"Vision extracted: {event['title']} on {event['date_text']} at {event['time']}")
+
+            return events
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Claude Vision API response as JSON: {e}")
+            logger.error(f"Response was: {response_text[:1000]}")
+            return []
+        except Exception as e:
+            logger.error(f"Claude Vision API extraction failed: {e}")
             return []
 
     def _parse_event_text(self, text: str) -> Optional[Dict]:

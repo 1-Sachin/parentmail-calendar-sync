@@ -67,7 +67,12 @@ This is where you store your credentials securely. GitHub encrypts these and nev
 - **Name**: `PARENTMAIL_PASSWORD`
 - **Value**: Your ParentMail password
 
-#### Secret 3: GOOGLE_CALENDAR_TOKEN
+#### Secret 3: ANTHROPIC_API_KEY
+- **Name**: `ANTHROPIC_API_KEY`
+- **Value**: Your Anthropic API key (from https://console.anthropic.com/settings/keys)
+- **Why**: The diary dates in the newsletter are embedded as an image. Claude's Vision API reads the image and extracts the events. Uses Haiku model so cost is negligible (fractions of a penny per run).
+
+#### Secret 4: GOOGLE_CALENDAR_TOKEN
 
 This one requires extracting your token from `token.json`. Here's how:
 
