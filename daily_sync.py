@@ -915,25 +915,52 @@ class ParentMailScraper:
             if not events:
                 logger.info("No HTML table found - using Claude Vision API to read diary dates image")
                 
-                # Take a full-page screenshot
-                screenshot_path = 'sway_full_page.png'
-                self.page.screenshot(path=screenshot_path, full_page=True)
-                screenshot_size = os.path.getsize(screenshot_path)
-                logger.info(f"Saved full-page screenshot: {screenshot_path} ({screenshot_size} bytes)")
+                # Sway's content is inside a scrollable div, so full_page=True only
+                # captures the outer page (720px viewport). We need to scroll through
+                # the inner container and take viewport screenshots at each position.
+                screenshot_paths = []
                 
-                # If the full-page screenshot is very large (>5MB), the image might be 
-                # too big for the API. Take sectioned screenshots of the bottom half 
-                # where diary dates typically are
-                if screenshot_size > 5 * 1024 * 1024:
-                    logger.info("Screenshot too large - taking bottom section only")
-                    # Scroll to bottom half of page where diary dates usually are
-                    self.page.evaluate(f'window.scrollTo(0, {final_height // 2})')
-                    self.page.wait_for_timeout(1000)
-                    screenshot_path = 'sway_bottom_section.png'
-                    self.page.screenshot(path=screenshot_path)
-                    logger.info(f"Saved bottom section screenshot: {screenshot_path}")
+                if scroll_info.get('found') and scroll_info['selector'] != 'document':
+                    selector = scroll_info['selector']
+                    container_height = scroll_info['scrollHeight']
+                    view_height = scroll_info['clientHeight']
+                    
+                    logger.info(f"Taking screenshots while scrolling through container ({container_height}px)")
+                    
+                    # Calculate number of screenshots needed (overlap by 10% to avoid missing content)
+                    step = int(view_height * 0.85)
+                    positions = list(range(0, container_height, step))
+                    
+                    for i, pos in enumerate(positions):
+                        # Scroll the container to this position
+                        self.page.evaluate(f"""
+                        () => {{
+                            const els = document.querySelectorAll('{selector}');
+                            for (const el of els) {{
+                                if (el.scrollHeight > el.clientHeight + 100) {{
+                                    el.scrollTop = {pos};
+                                    break;
+                                }}
+                            }}
+                        }}
+                        """)
+                        self.page.wait_for_timeout(800)
+                        
+                        # Take a viewport screenshot
+                        path = f'sway_section_{i}.png'
+                        self.page.screenshot(path=path)
+                        screenshot_paths.append(path)
+                        logger.info(f"Screenshot {i+1}/{len(positions)}: scroll position {pos}px")
+                    
+                    logger.info(f"Took {len(screenshot_paths)} screenshots covering the full newsletter")
+                else:
+                    # Fallback: just take a single full-page screenshot
+                    path = 'sway_full_page.png'
+                    self.page.screenshot(path=path, full_page=True)
+                    screenshot_paths.append(path)
+                    logger.info(f"Saved full-page screenshot: {path}")
                 
-                events = self._extract_events_with_vision(screenshot_path)
+                events = self._extract_events_with_vision(screenshot_paths)
 
             logger.info(f"Found {len(events)} events in Sway page")
             return events
@@ -942,21 +969,59 @@ class ParentMailScraper:
             logger.error(f"Failed to scrape Sway: {e}")
             return []
 
-    def _extract_events_with_vision(self, screenshot_path: str) -> List[Dict]:
+    def _extract_events_with_vision(self, screenshot_paths) -> List[Dict]:
         """
-        Use Claude Vision API to extract diary dates from a screenshot.
+        Use Claude Vision API to extract diary dates from screenshots.
+        Accepts either a single path string or a list of paths.
         The diary dates are displayed as an image/table in the Sway newsletter.
         """
         if not ANTHROPIC_API_KEY:
             logger.error("ANTHROPIC_API_KEY not set - cannot use vision extraction")
             return []
 
-        try:
-            # Read screenshot and encode as base64
-            with open(screenshot_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
+        # Normalize to list
+        if isinstance(screenshot_paths, str):
+            screenshot_paths = [screenshot_paths]
 
-            logger.info("Sending screenshot to Claude Vision API...")
+        try:
+            # Build content array with all images
+            content = []
+            for path in screenshot_paths:
+                with open(path, 'rb') as f:
+                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": image_data
+                    }
+                })
+
+            # Add the prompt
+            content.append({
+                "type": "text",
+                "text": f"""These are {len(screenshot_paths)} screenshots scrolling through a school newsletter. Look through ALL images to find the "Diary Dates" table/section. It is displayed as an image of a table with coloured rows.
+
+Extract EVERY event from the diary dates table across all screenshots. Return them as a JSON array. Each event should have:
+- "date_text": the full date as shown (e.g. "Tuesday 10th February")
+- "title": the event name (e.g. "KS1 Welcome Wednesday")  
+- "time": the time shown (e.g. "8.40am-9.00am", "2.45pm", "All day")
+
+For multi-day events like "Monday 16th- Friday 20th March", use the start date as date_text and include the full date range in a "date_end" field.
+
+IMPORTANT: Extract ALL rows from the diary dates table, not just some. The table typically has 20-30 events spanning several months.
+
+Return ONLY the JSON array, no other text. Example:
+[
+    {{"date_text": "Tuesday 10th February", "title": "Safer Internet Day", "time": "All Day"}},
+    {{"date_text": "Wednesday 11th February", "title": "KS1 Welcome Wednesday", "time": "8.40am-9.00am"}}
+]
+
+If you cannot find a diary dates table in any of the images, return an empty array: []"""
+            })
+
+            logger.info(f"Sending {len(screenshot_paths)} screenshots to Claude Vision API...")
 
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -966,35 +1031,7 @@ class ParentMailScraper:
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": image_data
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": """Look at this school newsletter screenshot. Find the "Diary Dates" table/section.
-
-Extract EVERY event from the diary dates table and return them as a JSON array. Each event should have:
-- "date_text": the full date as shown (e.g. "Tuesday 10th February")
-- "title": the event name (e.g. "KS1 Welcome Wednesday")  
-- "time": the time shown (e.g. "8.40am-9.00am", "2.45pm", "All day")
-
-For multi-day events like "Monday 16th- Friday 20th March", use the start date as date_text and include the full date range in a "date_end" field.
-
-Return ONLY the JSON array, no other text. Example:
-[
-    {"date_text": "Tuesday 10th February", "title": "Safer Internet Day", "time": "All Day"},
-    {"date_text": "Wednesday 11th February", "title": "KS1 Welcome Wednesday", "time": "8.40am-9.00am"}
-]
-
-If you cannot find a diary dates table, return an empty array: []"""
-                            }
-                        ]
+                        "content": content
                     }
                 ]
             )
@@ -1004,7 +1041,6 @@ If you cannot find a diary dates table, return an empty array: []"""
             logger.info(f"Claude Vision API response (first 500 chars): {response_text[:500]}")
 
             # Extract JSON array from response - Claude may include text before/after the JSON
-            # Try to find a JSON array in the response
             json_match = re.search(r'\[[\s\S]*\]', response_text)
             if not json_match:
                 logger.error("No JSON array found in Claude Vision API response")
@@ -1021,8 +1057,9 @@ If you cannot find a diary dates table, return an empty array: []"""
             raw_events = json.loads(json_text)
             logger.info(f"Parsed {len(raw_events)} events from Claude Vision API")
 
-            # Convert to our event format
+            # Convert to our event format and deduplicate
             events = []
+            seen = set()
             for raw in raw_events:
                 event = {
                     'date_text': raw.get('date_text', ''),
@@ -1033,7 +1070,10 @@ If you cannot find a diary dates table, return an empty array: []"""
                 if raw.get('date_end'):
                     event['date_end_text'] = raw['date_end']
 
-                if event['title'] and event['date_text']:
+                # Deduplicate (overlapping screenshots may capture same events)
+                dedup_key = f"{event['date_text']}|{event['title']}".lower()
+                if event['title'] and event['date_text'] and dedup_key not in seen:
+                    seen.add(dedup_key)
                     events.append(event)
                     logger.info(f"Vision extracted: {event['title']} on {event['date_text']} at {event['time']}")
 
