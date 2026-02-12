@@ -952,9 +952,9 @@ class ParentMailScraper:
                         except:
                             continue
                     
-                    # Strategy 2: Find the last large image (diary dates is usually last)
+                    # Strategy 2: Screenshot all large images (diary dates may span multiple)
                     if not diary_image:
-                        logger.info("Trying to find last large image on page")
+                        logger.info("Trying to find large images on page")
                         large_images = []
                         for img in all_images:
                             try:
@@ -965,92 +965,44 @@ class ParentMailScraper:
                                 continue
                         
                         if large_images:
-                            # Use the last large image
-                            diary_image, box = large_images[-1]
-                            logger.info(f"Using last large image ({box['width']:.0f}x{box['height']:.0f}px)")
+                            logger.info(f"Found {len(large_images)} large images - screenshotting all")
+                            screenshot_paths = []
+                            for i, (img, box) in enumerate(large_images):
+                                try:
+                                    img.scroll_into_view_if_needed()
+                                    self.page.wait_for_timeout(800)
+                                    path = f'diary_image_{i}.png'
+                                    img.screenshot(path=path)
+                                    img_size = os.path.getsize(path)
+                                    logger.info(f"  Screenshot large image {i}: {box['width']:.0f}x{box['height']:.0f}px -> {path} ({img_size} bytes)")
+                                    screenshot_paths.append(path)
+                                except Exception as e:
+                                    logger.warning(f"  Failed to screenshot image {i}: {e}")
+                            
+                            if screenshot_paths:
+                                events = self._extract_events_with_vision(screenshot_paths)
                     
-                    if diary_image:
-                        # Scroll the image into view
+                    # If we found a diary_image by alt text, screenshot just that one
+                    if diary_image and not events:
                         try:
                             diary_image.scroll_into_view_if_needed()
-                            self.page.wait_for_timeout(1500)
-                        except:
-                            pass
-                        
-                        # Try clicking to enlarge (Sway often has lightbox/zoom)
-                        enlarged = False
-                        try:
-                            diary_image.click()
-                            self.page.wait_for_timeout(2000)
-                            
-                            # Check if a lightbox/modal/enlarged view opened
-                            lightbox_selectors = [
-                                '[class*="lightbox"]', '[class*="Lightbox"]',
-                                '[class*="modal"]', '[class*="Modal"]', 
-                                '[class*="overlay"]', '[class*="Overlay"]',
-                                '[class*="zoom"]', '[class*="Zoom"]',
-                                '[class*="expanded"]', '[class*="Expanded"]',
-                                '[role="dialog"]',
-                                '[class*="fullscreen"]', '[class*="Fullscreen"]',
-                            ]
-                            for lb_sel in lightbox_selectors:
-                                try:
-                                    lb = self.page.locator(lb_sel).first
-                                    if lb.is_visible(timeout=1000):
-                                        logger.info(f"Lightbox opened with selector: {lb_sel}")
-                                        screenshot_path = 'diary_dates_enlarged.png'
-                                        self.page.screenshot(path=screenshot_path)
-                                        enlarged = True
-                                        break
-                                except:
-                                    continue
-                            
-                            if not enlarged:
-                                # Check if a larger image appeared
-                                enlarged_img = self.page.locator('img[class*="expanded"], img[class*="zoom"], img[class*="full"]').first
-                                try:
-                                    if enlarged_img.is_visible(timeout=1000):
-                                        screenshot_path = 'diary_dates_enlarged.png'
-                                        enlarged_img.screenshot(path=screenshot_path)
-                                        enlarged = True
-                                        logger.info("Found enlarged image element")
-                                except:
-                                    pass
+                            self.page.wait_for_timeout(1000)
+                            screenshot_path = 'diary_dates_direct.png'
+                            diary_image.screenshot(path=screenshot_path)
+                            img_size = os.path.getsize(screenshot_path)
+                            logger.info(f"Diary dates screenshot: {screenshot_path} ({img_size} bytes)")
+                            events = self._extract_events_with_vision(screenshot_path)
                         except Exception as e:
-                            logger.info(f"Click to enlarge failed: {e}")
-                        
-                        if not enlarged:
-                            # Just screenshot the image element directly
-                            logger.info("No lightbox - screenshotting image element directly")
-                            try:
-                                screenshot_path = 'diary_dates_direct.png'
-                                diary_image.screenshot(path=screenshot_path)
-                            except Exception as e:
-                                logger.warning(f"Element screenshot failed: {e}")
-                                # Fallback: screenshot the viewport with the image visible
-                                screenshot_path = 'diary_dates_viewport.png'
-                                self.page.screenshot(path=screenshot_path)
-                        
-                        # Close lightbox if it was opened (press Escape)
-                        if enlarged:
-                            try:
-                                self.page.keyboard.press('Escape')
-                                self.page.wait_for_timeout(500)
-                            except:
-                                pass
-                        
-                        img_size = os.path.getsize(screenshot_path)
-                        logger.info(f"Diary dates screenshot: {screenshot_path} ({img_size} bytes)")
-                    else:
-                        logger.warning("Could not find any diary dates image")
+                            logger.warning(f"Failed to screenshot diary image: {e}")
+                    
+                    if not events:
+                        logger.warning("Could not find or extract diary dates from any images")
                 
                 else:
                     # No scrollable container found - take full page screenshot
                     screenshot_path = 'sway_full_page.png'
                     self.page.screenshot(path=screenshot_path, full_page=True)
                     logger.info(f"Saved full-page screenshot: {screenshot_path}")
-                
-                if screenshot_path:
                     events = self._extract_events_with_vision(screenshot_path)
 
             logger.info(f"Found {len(events)} events in Sway page")
