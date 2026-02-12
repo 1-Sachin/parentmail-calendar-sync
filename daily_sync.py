@@ -919,9 +919,9 @@ class ParentMailScraper:
                 # captures the outer page (720px viewport). We need to scroll through
                 # the inner container and take viewport screenshots.
                 #
-                # The diary dates table is typically in the bottom third of the newsletter.
-                # To keep API costs low and improve accuracy, we only screenshot the 
-                # bottom 60% of the page (skipping headers, news sections at the top).
+                # Strategy: Take screenshots of the FULL page but limit to ~5 images
+                # by using large scroll steps. This ensures we capture the diary dates
+                # table wherever it appears, while keeping the API call manageable.
                 screenshot_paths = []
                 
                 if scroll_info.get('found') and scroll_info['selector'] != 'document':
@@ -929,13 +929,13 @@ class ParentMailScraper:
                     container_height = scroll_info['scrollHeight']
                     view_height = scroll_info['clientHeight']
                     
-                    # Start from 40% down the page to skip newsletter header/body
-                    start_position = int(container_height * 0.4)
-                    # Use larger steps with slight overlap
-                    step = int(view_height * 0.9)
-                    positions = list(range(start_position, container_height, step))
+                    # Use large steps to cover the full page in ~5-6 screenshots
+                    # No overlap needed - we just need the diary dates visible somewhere
+                    num_screenshots = 6
+                    step = container_height // num_screenshots
+                    positions = [i * step for i in range(num_screenshots)]
                     
-                    logger.info(f"Taking screenshots from position {start_position}px to {container_height}px ({len(positions)} screenshots)")
+                    logger.info(f"Taking {num_screenshots} screenshots across full page ({container_height}px, step={step}px)")
                     
                     for i, pos in enumerate(positions):
                         # Scroll the container to this position
@@ -956,9 +956,9 @@ class ParentMailScraper:
                         path = f'sway_section_{i}.png'
                         self.page.screenshot(path=path)
                         screenshot_paths.append(path)
-                        logger.info(f"Screenshot {i+1}/{len(positions)}: scroll position {pos}px")
+                        logger.info(f"Screenshot {i+1}/{num_screenshots}: scroll position {pos}px")
                     
-                    logger.info(f"Took {len(screenshot_paths)} screenshots of diary dates area")
+                    logger.info(f"Took {len(screenshot_paths)} screenshots across the newsletter")
                 else:
                     # Fallback: just take a single full-page screenshot
                     path = 'sway_full_page.png'
