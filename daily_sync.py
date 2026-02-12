@@ -985,6 +985,15 @@ class ParentMailScraper:
                             stitched.paste(img, (0, y_offset))
                             y_offset += img.height
                         
+                        # Resize if exceeds API limit of 8000px on any dimension
+                        max_dimension = 7900  # Leave a small margin
+                        if total_height > max_dimension or total_width > max_dimension:
+                            scale = min(max_dimension / total_height, max_dimension / total_width)
+                            new_width = int(total_width * scale)
+                            new_height = int(total_height * scale)
+                            stitched = stitched.resize((new_width, new_height), Image.LANCZOS)
+                            logger.info(f"Resized from {total_width}x{total_height} to {new_width}x{new_height}")
+                        
                         stitched_path = 'sway_stitched.png'
                         stitched.save(stitched_path, optimize=True)
                         stitched_size = os.path.getsize(stitched_path)
