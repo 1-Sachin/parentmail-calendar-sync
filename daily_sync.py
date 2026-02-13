@@ -641,6 +641,9 @@ class ParentMailScraper:
                             events = self._extract_events_from_text(email_text, strict_mode=True)
                         
                         if events:
+                            # Attach the email body to each event for calendar notes
+                            for ev in events:
+                                ev['email_body'] = email_text[:5000]  # Cap at 5000 chars
                             all_events.extend(events)
                             logger.info(f"Extracted {len(events)} events from email text")
 
@@ -1720,9 +1723,14 @@ class GoogleCalendarSync:
 
         event['date_parsed'] = date_str
 
-        # Build event title with child prefix
+        # Build event title with class prefix
         child = event.get('child', 'Both')
-        prefix = f"[{child}] " if child != 'Both' else "[School] "
+        prefix_map = {
+            'Arvi': '[Red Class] ',
+            'Rivan': '[Yellow Class] ',
+            'Both': '[School] ',
+        }
+        prefix = prefix_map.get(child, '[School] ')
         title = prefix + event.get('title', 'School Event')
 
         # Parse time
@@ -1771,8 +1779,12 @@ class GoogleCalendarSync:
         if event.get('color_id'):
             event_body['colorId'] = event['color_id']
 
-        # Add description
-        event_body['description'] = f"Auto-synced from ParentMail newsletter.\n\nOriginal text: {event.get('raw_text', '')}"
+        # Add description - include full email body for email-sourced events
+        source = event.get('source', '')
+        if source == 'email_claude' and event.get('email_body'):
+            event_body['description'] = f"Auto-synced from ParentMail email.\n\n--- Original Email ---\n{event['email_body']}"
+        else:
+            event_body['description'] = f"Auto-synced from ParentMail newsletter."
 
         try:
             # Route to the correct calendar based on child category
@@ -1861,10 +1873,11 @@ def send_notification_email(created_events: List[Dict]) -> bool:
     # Build HTML body
     events_html = ""
     for event in created_events:
-        child_emoji = "👦" if event['child'] == 'Rivan' else "👧" if event['child'] == 'Arvi' else "👨‍👩‍👧‍👦"
+        child_emoji = "🔴" if event['child'] == 'Arvi' else "🟡" if event['child'] == 'Rivan' else "🏫"
+        child_label = "Red Class" if event['child'] == 'Arvi' else "Yellow Class" if event['child'] == 'Rivan' else "School"
         events_html += f"""
         <tr>
-            <td style="padding: 8px; border-bottom: 1px solid #eee;">{child_emoji} {event['child']}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;">{child_emoji} {child_label}</td>
             <td style="padding: 8px; border-bottom: 1px solid #eee;"><strong>{event['title']}</strong></td>
             <td style="padding: 8px; border-bottom: 1px solid #eee;">{event['date']}</td>
             <td style="padding: 8px; border-bottom: 1px solid #eee;">{event['time']}</td>
@@ -1902,7 +1915,8 @@ def send_notification_email(created_events: List[Dict]) -> bool:
     # Plain text version
     text_body = f"ParentMail Calendar Sync\n\n{len(created_events)} new event(s) added:\n\n"
     for event in created_events:
-        text_body += f"- [{event['child']}] {event['title']} - {event['date']} at {event['time']}\n"
+        label = "Red Class" if event['child'] == 'Arvi' else "Yellow Class" if event['child'] == 'Rivan' else "School"
+        text_body += f"- [{label}] {event['title']} - {event['date']} at {event['time']}\n"
 
     try:
         msg = MIMEMultipart('alternative')
