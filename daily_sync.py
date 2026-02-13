@@ -1055,12 +1055,28 @@ class ParentMailScraper:
             content = []
             for path in screenshot_paths:
                 with open(path, 'rb') as f:
-                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                    image_bytes = f.read()
+                    image_data = base64.b64encode(image_bytes).decode('utf-8')
+                
+                # Detect media type from file header
+                if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+                    media_type = "image/png"
+                elif image_bytes[:2] == b'\xff\xd8':
+                    media_type = "image/jpeg"
+                elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+                    media_type = "image/webp"
+                elif image_bytes[:3] == b'GIF':
+                    media_type = "image/gif"
+                else:
+                    media_type = "image/jpeg"  # Default fallback
+                
+                logger.info(f"Image {path}: detected media type {media_type}")
+                
                 content.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
+                        "media_type": media_type,
                         "data": image_data
                     }
                 })
