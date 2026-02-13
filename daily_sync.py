@@ -629,14 +629,20 @@ class ParentMailScraper:
                             all_events.extend(events)
                             logger.info(f"Extracted {len(events)} events from Sway")
                     else:
-                        # For non-Sway emails, use STRICT mode:
-                        # Only extract events that specifically mention YR/Y2/KS1
-                        # This avoids extracting junk like "Open 20th", "Closed 6th"
+                        # For non-Sway emails, use Claude API to extract events
+                        # This catches free-text emails like "YR Bike and Helmet on Friday"
                         email_text = self.page.locator('body').inner_text()
-                        events = self._extract_events_from_text(email_text, strict_mode=True)
+                        
+                        # Try Claude API first for intelligent extraction
+                        events = self._extract_events_from_email_with_claude(email_text)
+                        
+                        # Fallback to regex-based extraction
+                        if not events:
+                            events = self._extract_events_from_text(email_text, strict_mode=True)
+                        
                         if events:
                             all_events.extend(events)
-                            logger.info(f"Extracted {len(events)} YR/Y2-specific events from email text")
+                            logger.info(f"Extracted {len(events)} events from email text")
 
                 except Exception as e:
                     logger.warning(f"Error processing email {i+1}: {e}")
@@ -1170,6 +1176,102 @@ If you cannot find a diary dates table in any of the images, return an empty arr
             logger.error(f"Claude Vision API extraction failed: {e}")
             return []
 
+    def _extract_events_from_email_with_claude(self, email_text: str) -> List[Dict]:
+        """
+        Use Claude API to intelligently extract school events from email body text.
+        This handles free-text emails like "YR Bike and Helmet on Friday 30th January"
+        that regex-based parsers miss.
+        """
+        if not ANTHROPIC_API_KEY:
+            logger.info("ANTHROPIC_API_KEY not set - skipping Claude email extraction")
+            return []
+
+        # Skip very short emails or ones that are clearly not event-related
+        if len(email_text.strip()) < 50:
+            return []
+
+        try:
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+            message = client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=2048,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"""This is an email from Caldecote Primary School. Extract any school events that have a specific date mentioned.
+
+An event must have:
+- A specific date (e.g. "Friday 30th January", "Tuesday 10th March")
+- An activity or thing happening (e.g. "bring bikes and helmets", "school trip", "parents evening")
+
+Do NOT extract:
+- Vague references without specific dates
+- Regular school activities (e.g. "reading every night")
+- Deadlines for forms/payments unless they're events parents should attend
+
+For each event, determine:
+- The date as written
+- A short, clear event title  
+- The time if mentioned, otherwise "All day"
+- Which year group it's for (look for YR, Y2, Reception, Year 2, KS1, Red class, Yellow class, or "whole school" if not specified)
+
+Return a JSON array. If no events found, return [].
+
+Example output:
+[{{"date_text": "Friday 30th January", "title": "YR Bike and Helmet Day", "time": "All day", "year_group": "YR"}}]
+
+Email text:
+{email_text[:3000]}"""
+                    }
+                ]
+            )
+
+            response_text = message.content[0].text.strip()
+            logger.info(f"Claude email extraction response (first 300 chars): {response_text[:300]}")
+
+            # Extract JSON
+            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            if not json_match:
+                logger.info("No events found in email by Claude")
+                return []
+
+            json_text = json_match.group()
+            json_text = re.sub(r'```json\s*', '', json_text)
+            json_text = re.sub(r'\s*```', '', json_text)
+
+            raw_events = json.loads(json_text)
+
+            if not raw_events:
+                return []
+
+            logger.info(f"Claude extracted {len(raw_events)} events from email")
+
+            # Convert to standard event format
+            events = []
+            for raw in raw_events:
+                event = {
+                    'date_text': raw.get('date_text', ''),
+                    'title': raw.get('title', ''),
+                    'time': raw.get('time', 'All day'),
+                    'raw_text': f"{raw.get('date_text', '')} {raw.get('title', '')} {raw.get('time', '')}",
+                    'source': 'email_claude',
+                }
+                # Include year group info in raw_text for filtering
+                year_group = raw.get('year_group', '')
+                if year_group:
+                    event['raw_text'] += f" {year_group}"
+                
+                if event['title'] and event['date_text']:
+                    events.append(event)
+                    logger.info(f"Email event: {event['title']} on {event['date_text']} ({year_group})")
+
+            return events
+
+        except Exception as e:
+            logger.warning(f"Claude email extraction failed: {e}")
+            return []
+
     def _parse_event_text(self, text: str) -> Optional[Dict]:
         """Parse a line of text into an event dictionary."""
         # Common date patterns
@@ -1371,9 +1473,14 @@ class EventFilter:
 
 
 class GoogleCalendarSync:
-    """Handles Google Calendar operations."""
+    """Handles Google Calendar operations with separate calendars per year group."""
 
     SCOPES = ['https://www.googleapis.com/auth/calendar']
+    
+    # Calendar names
+    CALENDAR_RED_CLASS = "Red Class (YR) - Caldecote"
+    CALENDAR_YELLOW_CLASS = "Yellow Class (Y2) - Caldecote"
+    CALENDAR_SCHOOL = "Caldecote Primary School"
 
     def __init__(self, token_json: str = None, credentials_json: str = None):
         """
@@ -1382,6 +1489,10 @@ class GoogleCalendarSync:
         """
         self.service = None
         self._init_service(token_json, credentials_json)
+        
+        # Calendar IDs - will be populated by _ensure_calendars_exist
+        self.calendar_ids = {}
+        self._ensure_calendars_exist()
 
     def _init_service(self, token_json: str, credentials_json: str):
         """Initialize the Google Calendar service."""
@@ -1414,24 +1525,81 @@ class GoogleCalendarSync:
         self.service = build('calendar', 'v3', credentials=creds)
         logger.info("Google Calendar service initialized")
 
-    def get_existing_events(self, start_date: datetime, end_date: datetime) -> List[Dict]:
-        """Get existing events in date range."""
+    def _ensure_calendars_exist(self):
+        """Create separate calendars if they don't exist, or find existing ones."""
+        calendar_configs = {
+            'Arvi': {'name': self.CALENDAR_RED_CLASS, 'color': '6'},      # Orange
+            'Rivan': {'name': self.CALENDAR_YELLOW_CLASS, 'color': '9'},   # Blue  
+            'Both': {'name': self.CALENDAR_SCHOOL, 'color': '11'},         # Red
+        }
+        
         try:
-            events_result = self.service.events().list(
-                calendarId='primary',
-                timeMin=start_date.isoformat() + 'Z',
-                timeMax=end_date.isoformat() + 'Z',
-                singleEvents=True,
-                orderBy='startTime'
-            ).execute()
-
-            events = events_result.get('items', [])
-            logger.info(f"Found {len(events)} existing events in calendar")
-            return events
-
+            # Get list of existing calendars
+            calendar_list = self.service.calendarList().list().execute()
+            existing = {cal['summary']: cal['id'] for cal in calendar_list.get('items', [])}
+            
+            for child, config in calendar_configs.items():
+                cal_name = config['name']
+                
+                if cal_name in existing:
+                    self.calendar_ids[child] = existing[cal_name]
+                    logger.info(f"Found existing calendar: {cal_name} ({existing[cal_name][:20]}...)")
+                else:
+                    # Create the calendar
+                    new_cal = self.service.calendars().insert(body={
+                        'summary': cal_name,
+                        'description': f'School events for {cal_name} - auto-synced from ParentMail',
+                        'timeZone': 'Europe/London',
+                    }).execute()
+                    
+                    cal_id = new_cal['id']
+                    self.calendar_ids[child] = cal_id
+                    logger.info(f"Created new calendar: {cal_name} ({cal_id[:20]}...)")
+                    
+                    # Set calendar color in the calendar list
+                    try:
+                        self.service.calendarList().patch(
+                            calendarId=cal_id,
+                            body={'colorId': config['color']}
+                        ).execute()
+                    except Exception as e:
+                        logger.warning(f"Could not set calendar color: {e}")
+            
+            logger.info(f"Calendar IDs: { {k: v[:20]+'...' for k, v in self.calendar_ids.items()} }")
+            
         except HttpError as e:
-            logger.error(f"Failed to get existing events: {e}")
-            return []
+            logger.error(f"Failed to set up calendars: {e}")
+            # Fallback to primary calendar for all
+            self.calendar_ids = {'Arvi': 'primary', 'Rivan': 'primary', 'Both': 'primary'}
+            logger.warning("Falling back to primary calendar for all events")
+
+    def _get_calendar_id(self, child: str) -> str:
+        """Get the calendar ID for a given child category."""
+        return self.calendar_ids.get(child, self.calendar_ids.get('Both', 'primary'))
+
+    def get_existing_events(self, start_date: datetime, end_date: datetime) -> List[Dict]:
+        """Get existing events from all school calendars in date range."""
+        all_events = []
+        
+        # Check all our calendars plus primary (for backwards compatibility with old events)
+        calendar_ids_to_check = set(self.calendar_ids.values()) | {'primary'}
+        
+        for cal_id in calendar_ids_to_check:
+            try:
+                events_result = self.service.events().list(
+                    calendarId=cal_id,
+                    timeMin=start_date.isoformat() + 'Z',
+                    timeMax=end_date.isoformat() + 'Z',
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+                events = events_result.get('items', [])
+                all_events.extend(events)
+            except HttpError as e:
+                logger.warning(f"Failed to get events from calendar {cal_id[:20]}: {e}")
+
+        logger.info(f"Found {len(all_events)} existing events across all calendars")
+        return all_events
 
     def is_duplicate(self, new_event: Dict, existing_events: List[Dict]) -> bool:
         """Check if event already exists in calendar."""
@@ -1607,12 +1775,21 @@ class GoogleCalendarSync:
         event_body['description'] = f"Auto-synced from ParentMail newsletter.\n\nOriginal text: {event.get('raw_text', '')}"
 
         try:
+            # Route to the correct calendar based on child category
+            child = event.get('child', 'Both')
+            calendar_id = self._get_calendar_id(child)
+            
             created = self.service.events().insert(
-                calendarId='primary',
+                calendarId=calendar_id,
                 body=event_body
             ).execute()
 
-            logger.info(f"Created event: {title} on {date_str}")
+            cal_name = {
+                'Arvi': self.CALENDAR_RED_CLASS,
+                'Rivan': self.CALENDAR_YELLOW_CLASS,
+                'Both': self.CALENDAR_SCHOOL,
+            }.get(child, 'primary')
+            logger.info(f"Created event: {title} on {date_str} -> {cal_name}")
             return created.get('id')
 
         except HttpError as e:
@@ -1646,11 +1823,18 @@ class GoogleCalendarSync:
                 event_id = self.create_event(event)
                 if event_id:
                     created += 1
+                    child = event.get('child', 'Both')
+                    cal_name = {
+                        'Arvi': self.CALENDAR_RED_CLASS,
+                        'Rivan': self.CALENDAR_YELLOW_CLASS,
+                        'Both': self.CALENDAR_SCHOOL,
+                    }.get(child, 'Primary')
                     created_events.append({
                         'title': event.get('title'),
                         'date': event.get('date_parsed'),
                         'time': event.get('time', 'All day'),
-                        'child': event.get('child', 'Both')
+                        'child': child,
+                        'calendar': cal_name,
                     })
                     # Add to existing events to prevent duplicates within this batch
                     existing_events.append({
