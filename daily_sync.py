@@ -952,34 +952,58 @@ class ParentMailScraper:
                         except:
                             continue
                     
-                    # Strategy 2: Screenshot all large images (diary dates may span multiple)
+                    # Strategy 2: Download all large images by their src URL
+                    # Element screenshots may fail for lazy-loaded images that show
+                    # as blank/placeholder. Downloading by URL gets the real image.
                     if not diary_image:
                         logger.info("Trying to find large images on page")
                         large_images = []
                         for img in all_images:
                             try:
                                 box = img.bounding_box()
-                                if box and box['width'] > 300 and box['height'] > 200:
-                                    large_images.append((img, box))
+                                src = img.get_attribute('src') or ''
+                                if box and box['width'] > 300 and box['height'] > 200 and src:
+                                    large_images.append((img, box, src))
                             except:
                                 continue
                         
                         if large_images:
-                            logger.info(f"Found {len(large_images)} large images - screenshotting all")
+                            logger.info(f"Found {len(large_images)} large images - downloading all by URL")
                             screenshot_paths = []
-                            for i, (img, box) in enumerate(large_images):
+                            for i, (img, box, src) in enumerate(large_images):
                                 try:
-                                    img.scroll_into_view_if_needed()
-                                    self.page.wait_for_timeout(800)
                                     path = f'diary_image_{i}.png'
-                                    img.screenshot(path=path)
-                                    img_size = os.path.getsize(path)
-                                    logger.info(f"  Screenshot large image {i}: {box['width']:.0f}x{box['height']:.0f}px -> {path} ({img_size} bytes)")
-                                    screenshot_paths.append(path)
+                                    
+                                    # Download the image using Playwright's request context
+                                    # This gets the actual full image, not a lazy-load placeholder
+                                    response = self.page.request.get(src)
+                                    if response.ok:
+                                        with open(path, 'wb') as f:
+                                            f.write(response.body())
+                                        img_size = os.path.getsize(path)
+                                        logger.info(f"  Downloaded image {i}: {box['width']:.0f}x{box['height']:.0f}px -> {path} ({img_size} bytes) from {src[:80]}")
+                                        
+                                        # Skip tiny images (< 10KB likely blank/placeholder)
+                                        if img_size > 10000:
+                                            screenshot_paths.append(path)
+                                        else:
+                                            logger.info(f"  Skipping image {i} - too small ({img_size} bytes), likely placeholder")
+                                    else:
+                                        logger.warning(f"  Failed to download image {i}: HTTP {response.status}")
+                                        
+                                        # Fallback: try element screenshot
+                                        img.scroll_into_view_if_needed()
+                                        self.page.wait_for_timeout(800)
+                                        img.screenshot(path=path)
+                                        img_size = os.path.getsize(path)
+                                        if img_size > 10000:
+                                            screenshot_paths.append(path)
+                                            logger.info(f"  Fallback screenshot image {i}: {img_size} bytes")
                                 except Exception as e:
-                                    logger.warning(f"  Failed to screenshot image {i}: {e}")
+                                    logger.warning(f"  Failed to get image {i}: {e}")
                             
                             if screenshot_paths:
+                                logger.info(f"Sending {len(screenshot_paths)} images to vision API")
                                 events = self._extract_events_with_vision(screenshot_paths)
                     
                     # If we found a diary_image by alt text, screenshot just that one
