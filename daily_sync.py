@@ -71,7 +71,8 @@ class ParentMailScraper:
 
     def __enter__(self):
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=False slow_mo=500)
+        # For local debugging: headless=False, slow_mo=500
+        self.browser = self.playwright.chromium.launch(headless=False)
         self.page = self.browser.new_page()
         return self
 
@@ -113,8 +114,59 @@ class ParentMailScraper:
             logger.warning(f"Error handling cookie banner: {e}")
             return False
 
+    def _handle_parent_portal_login(self) -> bool:
+        """Handle the parents.parentmail.co.uk/auth/login page (third step).
+
+        After IRIS auth, the flow redirects to the new parent portal which
+        requires entering email once more. The Login button starts disabled
+        and only enables after JS detects input, so we use .type() to trigger
+        real keystroke events.
+        """
+        if 'parents.parentmail.co.uk/auth/login' not in self.page.url:
+            return False
+
+        logger.info("On parent portal login page (third step) - handling...")
+        try:
+            portal_email = self.page.locator('input[name="username"]').first
+            portal_email.wait_for(state='visible', timeout=10000)
+
+            portal_email.click()
+            portal_email.type(self.email, delay=50)
+            logger.info("Typed email on parent portal page")
+
+            portal_btn = self.page.locator('button[type="submit"]:has-text("Login")').first
+            portal_btn.wait_for(state='visible', timeout=5000)
+
+            # Wait for button to become enabled (JS validation on input)
+            for _ in range(25):
+                try:
+                    if not portal_btn.is_disabled():
+                        break
+                except:
+                    pass
+                self.page.wait_for_timeout(200)
+
+            portal_btn.click()
+            logger.info("Clicked Login on parent portal page")
+
+            self.page.wait_for_timeout(4000)
+            self.page.wait_for_load_state('networkidle')
+            self.page.screenshot(path='step7b_after_portal_login.png')
+            logger.info(f"After parent portal login, URL: {self.page.url}")
+            return True
+        except Exception as e:
+            logger.error(f"Parent portal login step failed: {e}")
+            self.page.screenshot(path='step7b_portal_login_error.png')
+            return False
+
     def login(self) -> bool:
-        """Log into ParentMail via IRIS OAuth flow."""
+        """Log into ParentMail via IRIS OAuth flow.
+
+        The full flow is now three steps:
+        1. pmx.parentmail.co.uk - email entry, redirects to IRIS
+        2. identity.iris.co.uk - email + password (IRIS two-step internally)
+        3. parents.parentmail.co.uk/auth/login - email entry again, lands on dashboard
+        """
         logger.info("Logging into ParentMail...")
 
         try:
@@ -142,52 +194,53 @@ class ParentMailScraper:
             self.page.screenshot(path='step2_after_signin_click.png')
             logger.info(f"Step 2 - After sign in click, URL: {self.page.url}")
 
-            # Step 1: Fill email on ParentMail or IRIS page
-            email_field = self.page.locator('input[type="email"], input[name="username"], input[name="email"], #email, #okta-signin-username').first
+            # Step 1: Fill email on ParentMail page
+            email_field = self.page.locator(
+                'input[type="email"], input[name="username"], input[name="email"], #email, #okta-signin-username'
+            ).first
             email_field.wait_for(state='visible', timeout=10000)
             email_field.fill(self.email)
             logger.info("Filled email field")
 
             self.page.screenshot(path='step3_email_filled.png')
 
-            # Click continue/next/sign in to proceed to password
+            # Click continue/next/sign in to proceed
             try:
-                next_btn = self.page.locator('input[type="submit"], button[type="submit"], button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in")').first
+                next_btn = self.page.locator(
+                    'input[type="submit"], button[type="submit"], button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button:has-text("Login")'
+                ).first
                 next_btn.click()
                 logger.info("Clicked next/continue button")
             except Exception as e:
-                logger.warning(f"No next button found, trying to continue: {e}")
+                logger.warning(f"No next button found: {e}")
 
-            # Wait for redirect to IRIS identity provider
+            # Wait for redirect to IRIS
             self.page.wait_for_timeout(5000)
             self.page.wait_for_load_state('networkidle')
             self.page.screenshot(path='step4_after_email_submit.png')
             logger.info(f"Step 4 - After email submit, URL: {self.page.url}")
 
-            # Log page content for debugging
             page_text = self.page.locator('body').inner_text()
             logger.info(f"Page contains text (first 500 chars): {page_text[:500]}")
 
-            # IRIS has a two-step login: email first, then password
-            # Check if we're on the IRIS email step (shows "Email address" and "Next")
+            # Step 2: IRIS identity page (two-step internally: email, then password)
             if 'identity.iris.co.uk' in self.page.url:
                 logger.info("On IRIS identity page - handling two-step login")
 
-                # Step 2a: Fill email on IRIS page and click Next
+                # IRIS email step (if shown)
                 try:
                     iris_email_field = self.page.locator('input[type="email"], input[type="text"]').first
                     if iris_email_field.is_visible(timeout=3000):
-                        # Clear and fill email
                         iris_email_field.fill(self.email)
                         logger.info("Filled email on IRIS page")
                         self.page.screenshot(path='step5_iris_email_filled.png')
 
-                        # Click Next button
-                        next_btn = self.page.locator('button:has-text("Next"), input[value="Next"], button[type="submit"]').first
+                        next_btn = self.page.locator(
+                            'button:has-text("Next"), input[value="Next"], button[type="submit"]'
+                        ).first
                         next_btn.click()
                         logger.info("Clicked Next on IRIS page")
 
-                        # Wait for password page to load
                         self.page.wait_for_timeout(3000)
                         self.page.wait_for_load_state('networkidle')
                         self.page.screenshot(path='step5b_after_iris_next.png')
@@ -195,7 +248,7 @@ class ParentMailScraper:
                 except Exception as e:
                     logger.warning(f"IRIS email step handling: {e}")
 
-            # Step 2b: Handle password page
+            # IRIS password page
             password_selectors = [
                 'input[type="password"]',
                 '#okta-signin-password',
@@ -220,11 +273,9 @@ class ParentMailScraper:
                 logger.info("Password field not immediately visible, checking page state...")
                 self.page.screenshot(path='step5c_looking_for_password.png')
 
-                # Log what's on the page now
                 page_text2 = self.page.locator('body').inner_text()
                 logger.info(f"Current page text (first 500 chars): {page_text2[:500]}")
 
-                # Try waiting a bit longer and check again
                 self.page.wait_for_timeout(3000)
 
                 for selector in password_selectors:
@@ -248,7 +299,7 @@ class ParentMailScraper:
             logger.info("Filled password field")
             self.page.screenshot(path='step6_password_filled.png')
 
-            # Click sign in / verify button
+            # Submit password
             submit_selectors = [
                 'input[type="submit"]',
                 'button[type="submit"]',
@@ -269,24 +320,19 @@ class ParentMailScraper:
                 except:
                     continue
 
-            # Wait for potential "Stay signed in?" prompt to fully load
+            # "Stay signed in?" prompt
             logger.info("Waiting for 'Stay signed in' page to load...")
             self.page.wait_for_timeout(5000)
             self.page.wait_for_load_state('networkidle')
-
             self.page.screenshot(path='step6b_checking_stay_signed_in.png')
 
-            # Log what's on the page
             page_content = self.page.locator('body').inner_text()
             logger.info(f"Page content after password submit: {page_content[:500]}")
 
-            # Check if we're on the "Keep me signed in" page
             if 'Keep me signed in' in page_content or 'Stay signed in' in page_content:
                 logger.info("Found 'Stay signed in' prompt - attempting to click...")
-
                 clicked = False
 
-                # Method 1: Try clicking by exact role and name
                 try:
                     btn = self.page.get_by_role("button", name="Stay signed in")
                     if btn.is_visible(timeout=3000):
@@ -297,7 +343,6 @@ class ParentMailScraper:
                 except Exception as e:
                     logger.info(f"get_by_role method failed: {e}")
 
-                # Method 2: Try clicking by text content
                 if not clicked:
                     try:
                         btn = self.page.get_by_text("Stay signed in", exact=True)
@@ -309,7 +354,6 @@ class ParentMailScraper:
                     except Exception as e:
                         logger.info(f"get_by_text method failed: {e}")
 
-                # Method 3: Try various CSS selectors
                 if not clicked:
                     selectors = [
                         'button:has-text("Stay signed in")',
@@ -328,7 +372,6 @@ class ParentMailScraper:
                         except Exception as e:
                             logger.debug(f"Selector {selector} failed: {e}")
 
-                # Method 4: Find all buttons and click the right one
                 if not clicked:
                     logger.info("Trying to find all buttons...")
                     buttons = self.page.locator('button').all()
@@ -354,83 +397,64 @@ class ParentMailScraper:
 
             self.page.screenshot(path='step6b_after_stay_signed_in.png')
 
-            # Wait for redirect back to ParentMail - may take a while
-            logger.info("Waiting for redirect back to ParentMail...")
-
-            # Wait for URL to change to ParentMail domain
-            max_wait = 15  # seconds
+            # Wait for redirect - could be pmx.parentmail.co.uk OR parents.parentmail.co.uk
+            logger.info("Waiting for redirect after auth...")
+            max_wait = 20
             for i in range(max_wait):
                 self.page.wait_for_timeout(1000)
                 current_url = self.page.url
                 logger.info(f"Redirect check {i+1}/{max_wait}: {current_url}")
 
-                if 'pmx.parentmail.co.uk' in current_url:
-                    logger.info("Redirect to ParentMail detected!")
+                if 'parentmail.co.uk' in current_url and 'identity.iris.co.uk' not in current_url:
+                    logger.info("Redirect to parentmail.co.uk detected!")
                     break
 
             self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(2000)
             self.page.screenshot(path='step7_after_login_submit.png')
-            logger.info(f"Step 7 - Final URL after login: {self.page.url}")
+            logger.info(f"Step 7 - URL after IRIS auth: {self.page.url}")
 
-            # Check if login was successful
-            if 'pmx.parentmail.co.uk' in self.page.url:
-                logger.info("Redirected to ParentMail domain")
+            # Step 3: NEW parent portal login page - handle if we land there
+            self._handle_parent_portal_login()
 
-                # Handle cookie banner (may appear after redirect)
-                self.handle_cookie_banner()
-                self.page.wait_for_timeout(2000)
+            # Final success check
+            final_url = self.page.url
+            logger.info(f"Final URL: {final_url}")
 
-                self.page.screenshot(path='step8_parentmail_after_login.png')
-                logger.info(f"ParentMail after login, URL: {self.page.url}")
+            # Handle cookie banner on landing page
+            self.handle_cookie_banner()
+            self.page.wait_for_timeout(2000)
+            self.page.screenshot(path='step8_final_after_login.png')
 
-                # Check if we're ACTUALLY logged in by looking at page content
-                page_text = self.page.locator('body').inner_text()
-                logger.info(f"Page content after login (first 500 chars): {page_text[:500]}")
+            page_text = self.page.locator('body').inner_text()
+            logger.info(f"Final page content (first 500 chars): {page_text[:500]}")
 
-                # If we landed on a valid page (emails, feed, etc.), we're logged in!
-                if '/web/' in self.page.url or '/feed' in self.page.url or '/emails' in self.page.url:
-                    logger.info("Login successful - landed on authenticated page!")
-                    return True
-
-                # Look for signs we're logged in (emails link, dashboard, etc.)
-                if 'Emails' in page_text or 'Messages' in page_text or 'Dashboard' in page_text or 'Sachin' in page_text:
-                    logger.info("Login successful - found dashboard elements!")
-                    return True
-
-                # If we see "To Register" or login page content, we're NOT logged in
-                if 'To Register' in page_text or 'follow the link' in page_text.lower():
-                    logger.error("Not actually logged in - still seeing registration page")
-                    self.page.screenshot(path='login_not_actually_working.png')
-                    return False
-
-                # URL check - if on login page, not logged in
-                if '#core/login' in self.page.url:
-                    logger.error("Still on login page - login failed")
-                    return False
-
-                logger.info("Login appears successful")
-                return True
-
-            # Alternative check: look for dashboard elements
-            try:
-                if self.page.locator('text=Emails').is_visible(timeout=5000):
-                    logger.info("Login successful - found Emails link!")
-                    return True
-            except:
-                pass
-
-            # Check if we're stuck on login/identity page
-            if 'identity.iris.co.uk' in self.page.url or 'login' in self.page.url.lower():
-                logger.error("Login failed - still on login/identity page")
-                self.page.screenshot(path='login_failed.png')
-
-                # Log page content to see if there's an error message
-                page_text = self.page.locator('body').inner_text()
-                logger.error(f"Login page content: {page_text[:500]}")
+            # Still on any login page = failure
+            if '/auth/login' in final_url or '#core/login' in final_url:
+                logger.error("Still on a login page after all steps - login failed")
                 return False
 
-            logger.info("Login appears successful")
-            return True
+            if 'identity.iris.co.uk' in final_url:
+                logger.error("Still on IRIS identity page - login failed")
+                return False
+
+            # Authenticated URL patterns
+            if '/web/' in final_url or '/feed' in final_url or '/emails' in final_url:
+                logger.info("Login successful - landed on authenticated page!")
+                return True
+
+            # Dashboard content markers
+            if any(marker in page_text for marker in ['Emails', 'Messages', 'Dashboard', 'Sachin']):
+                logger.info("Login successful - found dashboard elements!")
+                return True
+
+            # Landed on a parentmail domain but can't confirm - assume success
+            if 'parentmail.co.uk' in final_url:
+                logger.info("Landed on parentmail domain - assuming login successful")
+                return True
+
+            logger.error(f"Login state unclear - final URL: {final_url}")
+            return False
 
         except Exception as e:
             logger.error(f"Login failed: {e}")
@@ -440,223 +464,169 @@ class ParentMailScraper:
                 pass
             return False
 
-    def get_emails_list(self) -> List[Dict]:
-        """Navigate to emails and get list of recent emails."""
-        logger.info("Getting list of recent emails...")
+    # ---- New UI constant ----
+    # The new parent portal is served from a different domain than the login entry point
+    PORTAL_MESSAGES_URL = "https://parents.parentmail.co.uk/messages"
 
+    def _navigate_to_messages(self) -> bool:
+        """Navigate to the new parent portal messages page.
+
+        The new portal uses parents.parentmail.co.uk/messages (not pmx.*).
+        Returns True if the messages page loaded and shows message rows.
+        """
         try:
-            # Navigate to emails section
-            self.page.goto(f"{PARENTMAIL_URL}/ui/#/messages/emails")
+            logger.info(f"Navigating to messages page: {self.PORTAL_MESSAGES_URL}")
+            self.page.goto(self.PORTAL_MESSAGES_URL)
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(3000)
 
-            self.page.screenshot(path='emails_list.png')
-
-            # Get all email items in the list
-            # ParentMail typically shows emails in a list/table format
-            email_items = self.page.locator('[class*="message"], [class*="email"], [class*="item"], tr[class*="row"], .mail-item, .message-row').all()
-
-            if not email_items:
-                # Try alternative: look for clickable elements that might be emails
-                email_items = self.page.locator('div[role="listitem"], div[role="row"], .clickable').all()
-
-            logger.info(f"Found {len(email_items)} potential email items")
-
-            # Log what we see on the page for debugging
-            page_text = self.page.locator('body').inner_text()
-            logger.info(f"Emails page content (first 1000 chars): {page_text[:1000]}")
-
-            return email_items[:10]  # Check up to 10 most recent emails
-
-        except Exception as e:
-            logger.error(f"Failed to get emails list: {e}")
-            return []
-
-    def check_email_for_events(self, email_element) -> Optional[List[Dict]]:
-        """Click on an email and check if it contains event information."""
-        try:
-            # Click on the email to open it
-            email_element.click()
-            self.page.wait_for_load_state('networkidle')
-            self.page.wait_for_timeout(2000)
-
-            # Get email content
-            email_content = self.page.locator('body').inner_text()
-            logger.info(f"Checking email content (first 300 chars): {email_content[:300]}")
-
-            # Check for Sway link
-            sway_link = self.get_sway_link()
-            if sway_link:
-                logger.info(f"Found Sway link in email: {sway_link}")
-                events = self.scrape_sway_diary_dates(sway_link)
-                if events:
-                    return events
-
-            # Check for date patterns directly in email (for non-Sway emails)
-            events = self._extract_events_from_text(email_content)
-            if events:
-                logger.info(f"Found {len(events)} events directly in email")
-                return events
-
-            return None
-
-        except Exception as e:
-            logger.warning(f"Error checking email: {e}")
-            return None
-
-    def scan_all_recent_emails(self) -> List[Dict]:
-        """Scan recent emails for any event information."""
-        logger.info("Scanning recent emails for events...")
-
-        all_events = []
-
-        try:
-            # Check if we're already on an emails page
-            current_url = self.page.url
-            if '/emails' in current_url or '/feed' in current_url or '/messages' in current_url:
-                logger.info(f"Already on emails page: {current_url}")
-                page_loaded = True
-            else:
-                page_loaded = False
-
-            # Try different URL patterns for emails section
-            email_urls = [
-                f"{PARENTMAIL_URL}/web/feed-list/emails",  # This is the URL we see after login!
-                f"{PARENTMAIL_URL}/#/messages/emails",
-                f"{PARENTMAIL_URL}/ui/#/messages/emails",
-                f"{PARENTMAIL_URL}/#messages/emails",
-            ]
-
-            if not page_loaded:
-                for url in email_urls:
-                    logger.info(f"Trying emails URL: {url}")
-                    self.page.goto(url)
-                    self.page.wait_for_load_state('networkidle')
-                    self.page.wait_for_timeout(3000)
-
-                    # Check if we got a valid page (not 404 or login page)
-                    page_text = self.page.locator('body').inner_text()
-                    if '404' not in page_text and 'Not Found' not in page_text and 'To Register' not in page_text:
-                        logger.info(f"Successfully loaded emails page at: {url}")
-                        page_loaded = True
-                        break
-                    else:
-                        logger.warning(f"Page at {url} not valid, trying next...")
-
-            # Handle any cookie banners that appeared
             self.handle_cookie_banner()
             self.page.wait_for_timeout(1000)
 
-            if not page_loaded:
-                # Try clicking on Emails link from current page
-                logger.info("Trying to find and click Emails link...")
-                try:
-                    emails_link = self.page.locator('text=Emails, a:has-text("Emails"), [href*="emails"], [href*="messages"]').first
-                    if emails_link.is_visible(timeout=5000):
-                        emails_link.click()
-                        self.page.wait_for_load_state('networkidle')
-                        self.page.wait_for_timeout(2000)
-                        self.handle_cookie_banner()
-                        logger.info(f"Clicked Emails link, now at: {self.page.url}")
-                except Exception as e:
-                    logger.warning(f"Could not find Emails link: {e}")
-
-            self.page.screenshot(path='emails_inbox.png')
-
-            # Log page content to understand structure
-            page_text = self.page.locator('body').inner_text()
-            logger.info(f"Inbox page text (first 1500 chars): {page_text[:1500]}")
-
-            # Try to find clickable email rows/items
-            # Common selectors for email lists
-            selectors_to_try = [
-                'table tbody tr',
-                '[class*="message-item"]',
-                '[class*="mail-row"]',
-                '[class*="email-row"]',
-                'div[class*="list"] > div',
-                '.message-list-item',
-                '[data-testid*="message"]',
-                'a[href*="message"]',
-            ]
-
-            email_elements = []
-            for selector in selectors_to_try:
-                elements = self.page.locator(selector).all()
-                if elements and len(elements) > 0:
-                    logger.info(f"Found {len(elements)} elements with selector: {selector}")
-                    email_elements = elements[:5]  # Check up to 5 recent emails
-                    break
-
-            if not email_elements:
-                logger.warning("Could not find email list items - trying to click first visible email link")
-                # Fallback: just try to find and click any email
-                first_email = self.page.locator('text=/newsletter|update|diary|dates|calendar|event/i').first
-                if first_email.is_visible(timeout=3000):
-                    email_elements = [first_email]
-
-            logger.info(f"Will check {len(email_elements)} emails")
-
-            for i, email_elem in enumerate(email_elements):
-                try:
-                    logger.info(f"Checking email {i+1}...")
-
-                    # Navigate back to inbox first (if not first email)
-                    if i > 0:
-                        self.page.goto(f"{PARENTMAIL_URL}/ui/#/messages/emails")
-                        self.page.wait_for_load_state('networkidle')
-                        self.page.wait_for_timeout(2000)
-                        # Re-find the element since page reloaded
-                        for selector in selectors_to_try:
-                            elements = self.page.locator(selector).all()
-                            if elements and len(elements) > i:
-                                email_elem = elements[i]
-                                break
-
-                    # Click on email
-                    email_elem.click()
-                    self.page.wait_for_load_state('networkidle')
-                    self.page.wait_for_timeout(2000)
-
-                    self.page.screenshot(path=f'email_{i+1}_content.png')
-
-                    # Check for Sway link (newsletters have these - most reliable source)
-                    sway_link = self.get_sway_link()
-                    if sway_link:
-                        logger.info(f"Found Sway link in email {i+1}")
-                        events = self.scrape_sway_diary_dates(sway_link)
-                        if events:
-                            all_events.extend(events)
-                            logger.info(f"Extracted {len(events)} events from Sway")
-                    else:
-                        # For non-Sway emails, use Claude API to extract events
-                        # This catches free-text emails like "YR Bike and Helmet on Friday"
-                        email_text = self.page.locator('body').inner_text()
-                        
-                        # Try Claude API first for intelligent extraction
-                        events = self._extract_events_from_email_with_claude(email_text)
-                        
-                        # Fallback to regex-based extraction
-                        if not events:
-                            events = self._extract_events_from_text(email_text, strict_mode=True)
-                        
-                        if events:
-                            # Attach the email body to each event for calendar notes
-                            for ev in events:
-                                ev['email_body'] = email_text[:5000]  # Cap at 5000 chars
-                            all_events.extend(events)
-                            logger.info(f"Extracted {len(events)} events from email text")
-
-                except Exception as e:
-                    logger.warning(f"Error processing email {i+1}: {e}")
-                    continue
-
-            logger.info(f"Total events found across all emails: {len(all_events)}")
-            return all_events
+            # Wait for at least one message heading to appear - confirms UI rendered
+            try:
+                self.page.locator('h3.font-display').first.wait_for(state='visible', timeout=10000)
+                logger.info("Messages page loaded - found message headings")
+                return True
+            except Exception:
+                logger.warning("No message headings found on messages page")
+                self.page.screenshot(path='messages_page_no_headings.png')
+                # Log what's visible for debug
+                page_text = self.page.locator('body').inner_text()
+                logger.info(f"Messages page text (first 1000 chars): {page_text[:1000]}")
+                return False
 
         except Exception as e:
-            logger.error(f"Failed to scan emails: {e}")
+            logger.error(f"Failed to navigate to messages: {e}")
+            return False
+
+    def get_emails_list(self) -> List[Dict]:
+        """Get the list of message rows from the new parent portal.
+
+        Returns message metadata dicts (title, preview, element) for the most
+        recent messages. The actual element can be clicked to open the message.
+        """
+        logger.info("Getting list of recent messages...")
+
+        if not self._navigate_to_messages():
             return []
+
+        try:
+            self.page.screenshot(path='messages_list.png')
+
+            # Each message row contains an h3 title. Use the h3 as an anchor
+            # and walk up to the clickable card (the ancestor with cursor-pointer).
+            headings = self.page.locator('h3.font-display').all()
+            logger.info(f"Found {len(headings)} message headings")
+
+            messages = []
+            for heading in headings[:15]:  # Cap at 15 most recent
+                try:
+                    title = heading.inner_text().strip()
+                    # The clickable card is an ancestor div with class group/card
+                    card = heading.locator(
+                        'xpath=ancestor::div[contains(@class, "group/card")]'
+                    ).first
+                    messages.append({
+                        'title': title,
+                        'element': card,
+                    })
+                except Exception as e:
+                    logger.debug(f"Skipping heading due to error: {e}")
+                    continue
+
+            logger.info(f"Extracted {len(messages)} message entries")
+            for m in messages[:5]:
+                logger.info(f"  - {m['title']}")
+
+            return messages
+
+        except Exception as e:
+            logger.error(f"Failed to get messages list: {e}")
+            return []
+
+    def _open_message_and_extract(self, message: Dict, index: int) -> List[Dict]:
+        """Click into a message, extract events via Sway link or direct text.
+
+        Returns a list of events (possibly empty).
+        """
+        events_found: List[Dict] = []
+        try:
+            title = message.get('title', '?')
+            logger.info(f"Opening message {index+1}: {title}")
+
+            element = message['element']
+            element.scroll_into_view_if_needed(timeout=5000)
+            element.click()
+
+            self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(2500)
+            self.page.screenshot(path=f'message_{index+1}_opened.png')
+
+            logger.info(f"Message opened - URL: {self.page.url}")
+
+            # Preferred path: Sway link
+            sway_link = self.get_sway_link()
+            if sway_link:
+                logger.info(f"Found Sway link in message {index+1}: {sway_link}")
+                events = self.scrape_sway_diary_dates(sway_link)
+                if events:
+                    events_found.extend(events)
+                    logger.info(f"Extracted {len(events)} events from Sway")
+                return events_found
+
+            # Fallback: parse message body directly with Claude, then regex
+            email_text = self.page.locator('body').inner_text()
+            events = self._extract_events_from_email_with_claude(email_text)
+            if not events:
+                events = self._extract_events_from_text(email_text, strict_mode=True)
+
+            if events:
+                for ev in events:
+                    ev['email_body'] = email_text[:5000]
+                events_found.extend(events)
+                logger.info(f"Extracted {len(events)} events from message text")
+
+            return events_found
+
+        except Exception as e:
+            logger.warning(f"Error opening/processing message {index+1}: {e}")
+            return events_found
+
+    def scan_all_recent_emails(self) -> List[Dict]:
+        """Scan recent messages in the new portal for events.
+
+        Strategy:
+        - Navigate to /messages
+        - For each of the top N message rows, open it, extract events
+        - Navigate back to /messages between each (the row elements get stale
+          after the SPA swaps views, so we re-fetch the list each iteration)
+        """
+        logger.info("Scanning recent messages for events...")
+
+        all_events: List[Dict] = []
+        max_messages = 5  # Most recent 5 messages
+
+        for i in range(max_messages):
+            messages = self.get_emails_list()
+            if not messages:
+                logger.warning("No messages found on portal")
+                break
+
+            if i >= len(messages):
+                logger.info(f"Only {len(messages)} messages available, stopping")
+                break
+
+            # Re-fetching the list gives fresh element handles each iteration,
+            # avoiding stale references after SPA navigation
+            target = messages[i]
+            events = self._open_message_and_extract(target, i)
+            if events:
+                all_events.extend(events)
+
+        logger.info(f"Total events found across all messages: {len(all_events)}")
+        return all_events
+
 
     def get_latest_newsletter(self) -> Optional[str]:
         """Legacy method - now redirects to scan_all_recent_emails."""
