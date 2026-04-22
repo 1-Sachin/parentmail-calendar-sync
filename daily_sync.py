@@ -153,11 +153,103 @@ class ParentMailScraper:
             self.page.wait_for_load_state('networkidle')
             self.page.screenshot(path='step7b_after_portal_login.png')
             logger.info(f"After parent portal login, URL: {self.page.url}")
+
+            # The portal login may trigger a second OAuth roundtrip to IRIS.
+            # On fresh sessions (no cookies, e.g. GitHub Actions runners) IRIS
+            # will show "Stay signed in" again before returning to the portal.
+            # On cached sessions (local Mac) this is skipped.
+            self._handle_second_iris_stay_signed_in()
+
+            logger.info(f"After full portal+IRIS flow, URL: {self.page.url}")
             return True
         except Exception as e:
             logger.error(f"Parent portal login step failed: {e}")
             self.page.screenshot(path='step7b_portal_login_error.png')
             return False
+
+    def _handle_second_iris_stay_signed_in(self) -> None:
+        """Handle the second IRIS 'Stay signed in' prompt after portal login.
+
+        The portal login triggers a fresh OAuth flow back to IRIS. On cached
+        sessions the password step is skipped but IRIS may still show the
+        'Keep me signed in' prompt. Click 'Stay signed in' and wait for
+        redirect back to the portal.
+        """
+        # Give IRIS a moment to render if we bounced there
+        for _ in range(10):
+            if 'identity.iris.co.uk' in self.page.url:
+                break
+            self.page.wait_for_timeout(500)
+
+        if 'identity.iris.co.uk' not in self.page.url:
+            logger.info("No second IRIS bounce detected - session may be cached")
+            return
+
+        logger.info("Second IRIS bounce detected - handling 'Stay signed in'")
+        self.page.wait_for_load_state('networkidle')
+        self.page.wait_for_timeout(2000)
+        self.page.screenshot(path='step7c_second_iris.png')
+
+        page_content = self.page.locator('body').inner_text()
+        logger.info(f"Second IRIS page content: {page_content[:300]}")
+
+        if 'Keep me signed in' not in page_content and 'Stay signed in' not in page_content:
+            logger.info("No stay-signed-in prompt on second IRIS - waiting for redirect")
+            self.page.wait_for_timeout(5000)
+            return
+
+        clicked = False
+
+        # Try role-based selector first
+        try:
+            btn = self.page.get_by_role("button", name="Stay signed in")
+            if btn.is_visible(timeout=3000):
+                btn.click()
+                logger.info("Clicked 'Stay signed in' (second time) via get_by_role")
+                clicked = True
+        except Exception as e:
+            logger.debug(f"Second stay-signed-in get_by_role failed: {e}")
+
+        if not clicked:
+            try:
+                btn = self.page.locator('button:has-text("Stay signed in")').first
+                if btn.is_visible(timeout=2000):
+                    btn.click()
+                    logger.info("Clicked 'Stay signed in' (second time) via locator")
+                    clicked = True
+            except Exception as e:
+                logger.debug(f"Second stay-signed-in locator failed: {e}")
+
+        if not clicked:
+            # Brute force: iterate all buttons
+            buttons = self.page.locator('button').all()
+            for btn in buttons:
+                try:
+                    if 'Stay signed in' in btn.inner_text():
+                        btn.click()
+                        logger.info("Clicked 'Stay signed in' (second time) via iteration")
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+        if not clicked:
+            logger.error("Could not click 'Stay signed in' on second IRIS bounce")
+            self.page.screenshot(path='step7c_second_iris_failed.png')
+            return
+
+        # Wait for redirect back to portal
+        self.page.wait_for_timeout(3000)
+        self.page.wait_for_load_state('networkidle')
+
+        # Wait up to 15s for URL to leave IRIS
+        for i in range(15):
+            if 'identity.iris.co.uk' not in self.page.url:
+                logger.info(f"Redirected away from IRIS after {i+1}s: {self.page.url}")
+                break
+            self.page.wait_for_timeout(1000)
+
+        self.page.screenshot(path='step7d_after_second_iris.png')
 
     def login(self) -> bool:
         """Log into ParentMail via IRIS OAuth flow.
