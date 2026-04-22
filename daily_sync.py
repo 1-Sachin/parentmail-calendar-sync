@@ -71,7 +71,7 @@ class ParentMailScraper:
 
     def __enter__(self):
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=True)
+        self.browser = self.playwright.chromium.launch(headless=False)
         self.page = self.browser.new_page()
         return self
 
